@@ -899,6 +899,7 @@ export const ChatInput = memo(function ChatInput({
           await generateWithNarrativeDirector({
             chatId: activeChatId,
             connectionId: null,
+            ...(mode === "roleplay" && lastMsg.role === "assistant" ? { roleplayContinue: true } : {}),
           });
         } catch (error) {
           const msg = error instanceof Error ? error.message : "Generation failed";

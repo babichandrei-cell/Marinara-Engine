@@ -53,6 +53,8 @@ export const generateRequestSchema = z.object({
   narrativeDirectorMode: z.enum(["natural", "random"]).nullable().optional().default(null),
   generationGuide: z.string().nullable().optional().default(null),
   generationGuideSource: z.enum(["narrator", "guide", "game_start"]).nullable().optional().default(null),
+  /** Empty Roleplay Send: add a prompt-only user continuation turn without saving it. */
+  roleplayContinue: z.boolean().optional().default(false),
   agentInjectionOverrides: z
     .array(
       z.object({

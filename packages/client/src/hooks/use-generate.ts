@@ -1222,6 +1222,8 @@ export function useGenerate() {
       narrativeDirectorMode?: "natural" | "random";
       generationGuide?: string;
       generationGuideSource?: "narrator" | "guide" | "game_start";
+      /** Empty Roleplay Send: inject a prompt-only user turn without persisting it. */
+      roleplayContinue?: boolean;
       agentInjectionOverrides?: Array<{ agentType: string; agentName?: string; text: string }>;
       impersonatePresetId?: string;
       impersonateConnectionId?: string;

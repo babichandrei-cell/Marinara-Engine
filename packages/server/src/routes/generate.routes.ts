@@ -1629,6 +1629,16 @@ export async function generateRoutes(app: FastifyInstance) {
         mappedMessages.push(await mapChatHistoryMessageForPrompt(message));
       }
 
+      // Empty Send in Roleplay is a prompt-only user turn. It must reach the
+      // model as a normal user message, but must never be persisted or shown.
+      if (chatMode === "roleplay" && input.roleplayContinue) {
+        mappedMessages.push({
+          role: "user",
+          content: "Continue the story.",
+          contextKind: "injection",
+        });
+      }
+
       // Attach current request's provider inputs to the last user message (they're already saved in extra,
       // but the message was just created and may be the last in mappedMessages)
       if (!imageCaptioningRuntime.enabled && input.attachments?.length && !input.impersonate) {
