@@ -370,6 +370,7 @@ import {
 import { runTurnGameBotTurns } from "../services/turn-games/turn-game-bot-runner.service.js";
 import { getTurnGameContextBuilder } from "../services/turn-games/turn-game-runner.service.js";
 import { getCapabilityService } from "../services/capability-packages/capability-service-registry.service.js";
+import { dispatchCapabilityAgentPipelineSettled } from "../services/capability-packages/capability-agent-lifecycle.service.js";
 import { normalizeContextInjections } from "./generate/agent-normalizers.js";
 import {
   buildGenerationPromptPresetCandidates,
@@ -9640,6 +9641,15 @@ export async function generateRoutes(app: FastifyInstance) {
           // ── Text rewrite/editing agents: run after ALL other agents ──
           const originalResponseBeforeRewrite = completedResponse;
           let textRewriteApplied = false;
+          if (messageId) {
+            await dispatchCapabilityAgentPipelineSettled({
+              chatId: input.chatId,
+              generationId,
+              messageId,
+              swipeIndex: targetSwipeIndex,
+            });
+          }
+
           if (activatedTextRewriteRunAgents.length > 0 && messageId && !abortController.signal.aborted) {
             let currentResponseForRewrite = originalResponseBeforeRewrite;
 

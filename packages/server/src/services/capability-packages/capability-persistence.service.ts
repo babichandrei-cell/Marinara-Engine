@@ -4,6 +4,7 @@ import {
   type CapabilityChatRecord,
   type CapabilityCreateMessageWithSwipeInput,
   type CapabilityGameStateRecord,
+  type CapabilityTrackedCharacterRecord,
   type CapabilityRoleplayEventInput,
   type CapabilityRoleplayEventRecord,
   type CapabilityDocumentRecord,
@@ -127,6 +128,46 @@ function parsePresentCharacterIds(value: unknown): string[] {
       const record = entry as { characterId?: unknown; id?: unknown };
       const id = record.characterId ?? record.id;
       return typeof id === "string" && id.trim().length > 0 ? [id] : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function parseTrackedCharacters(value: unknown): CapabilityTrackedCharacterRecord[] {
+  if (typeof value !== "string") return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+      const record = entry as Record<string, unknown>;
+      const characterId =
+        typeof record.characterId === "string"
+          ? record.characterId.trim()
+          : typeof record.id === "string"
+            ? record.id.trim()
+            : "";
+      const name = typeof record.name === "string" ? record.name.trim() : "";
+      if (!characterId || !name) return [];
+
+      return [{
+        characterId,
+        name,
+        ...(typeof record.emoji === "string" ? { emoji: record.emoji } : {}),
+        ...(typeof record.mood === "string" ? { mood: record.mood } : {}),
+        ...(typeof record.appearance === "string" ? { appearance: record.appearance } : {}),
+        ...(typeof record.outfit === "string" ? { outfit: record.outfit } : {}),
+        ...(typeof record.thoughts === "string" ? { thoughts: record.thoughts } : {}),
+        ...(record.customFields &&
+        typeof record.customFields === "object" &&
+        !Array.isArray(record.customFields)
+          ? { customFields: record.customFields as Record<string, unknown> }
+          : {}),
+        ...(Array.isArray(record.stats) ? { stats: record.stats } : {}),
+        ...(typeof record.avatarPath === "string" ? { avatarPath: record.avatarPath } : {}),
+        ...(record.avatarCrop !== undefined ? { avatarCrop: record.avatarCrop } : {}),
+      }];
     });
   } catch {
     return [];
@@ -403,6 +444,20 @@ function createPersistenceSession(db: DB): CapabilityPersistenceSession {
         .orderBy(desc(gameStateSnapshots.createdAt), desc(gameStateSnapshots.id))
         .limit(1);
       return rows[0] ? mapGameState(rows[0]) : null;
+    },
+    async getCharacterTrackerState(chatId, messageId, swipeIndex) {
+      const rows = await db
+        .select({ presentCharacters: gameStateSnapshots.presentCharacters })
+        .from(gameStateSnapshots)
+        .where(
+          and(
+            eq(gameStateSnapshots.chatId, chatId),
+            eq(gameStateSnapshots.messageId, messageId),
+            eq(gameStateSnapshots.swipeIndex, swipeIndex),
+          ),
+        )
+        .limit(1);
+      return rows[0] ? parseTrackedCharacters(rows[0].presentCharacters) : [];
     },
     async appendRoleplayEvent(input: CapabilityRoleplayEventInput): Promise<CapabilityRoleplayEventRecord | null> {
       const scopedOwner = engineEventOwner(input.chatId);

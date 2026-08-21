@@ -2,6 +2,7 @@ import type {
   CapabilityCharacterRecord,
   CapabilityLorebookCreateInput,
   CapabilityLorebookEntryInput,
+  CapabilityLorebookEntryUpdateInput,
   CapabilityLorebookEntryRecord,
   CapabilityLorebookEntrySelection,
   CapabilityLorebookRecord,
@@ -127,8 +128,36 @@ export function createCapabilityResourceHost(db: DB): CapabilityResourceHost {
       await lorebooks.update(lorebookId, updates);
     },
 
+    async createLorebookEntry(
+      lorebookId: string,
+      entry: CapabilityLorebookEntryInput,
+    ): Promise<CapabilityLorebookEntryRecord> {
+      const record = (await lorebooks.createEntry({
+        ...entry,
+        lorebookId,
+      })) as unknown as LorebookEntrySource | null;
+
+      if (!record) {
+        throw new Error("[capability] createLorebookEntry failed");
+      }
+      const books = (await lorebooks.list()) as unknown as Array<{ id: string; name: string }>;
+      const lorebookName = books.find((book) => book.id === record.lorebookId)?.name ?? "Unknown lorebook";
+      return {
+        id: record.id,
+        lorebookId: record.lorebookId,
+        lorebookName,
+        name: record.name,
+        content: record.content,
+        description: record.description,
+      };
+    },
+
     async bulkCreateLorebookEntries(lorebookId: string, entries: CapabilityLorebookEntryInput[]): Promise<void> {
       await lorebooks.bulkCreateEntries(lorebookId, entries);
+    },
+
+    async updateLorebookEntry(entryId: string, updates: CapabilityLorebookEntryUpdateInput): Promise<void> {
+      await lorebooks.updateEntry(entryId, updates);
     },
 
     async removeLorebookEntry(entryId: string): Promise<void> {

@@ -92,12 +92,20 @@ export interface CapabilityLorebookCreateInput {
   scanDepth?: number;
   tokenBudget?: number;
   personaId?: string;
+  /** Bind the lorebook to one Character card. */
+  characterId?: string;
+  /** Bind the lorebook to multiple Character cards. */
+  characterIds?: string[];
   enabled?: boolean;
 }
-/** The retrieval knobs a package may retune on a lorebook it owns. */
+/** The retrieval/ownership knobs a package may retune on a lorebook it owns. */
 export interface CapabilityLorebookUpdateInput {
   scanDepth?: number;
   tokenBudget?: number;
+  /** Replace Character ownership with one Character card. */
+  characterId?: string;
+  /** Replace Character ownership with these Character cards. */
+  characterIds?: string[];
 }
 /** One lorebook entry to store. Extra keys pass through to storage; see the index signature below. */
 export interface CapabilityLorebookEntryInput {
@@ -106,6 +114,31 @@ export interface CapabilityLorebookEntryInput {
   content?: string;
   keys?: string[];
   [key: string]: unknown;
+}
+
+/** Narrow update surface for an existing lorebook entry. */
+export interface CapabilityLorebookEntryUpdateInput {
+  name?: string;
+  content?: string;
+  description?: string;
+  keys?: string[];
+  secondaryKeys?: string[];
+}
+
+/** One authoritative Character Tracker entry persisted for a message/swipe anchor. */
+export interface CapabilityTrackedCharacterRecord {
+  characterId: string;
+  name: string;
+  emoji?: string;
+  mood?: string;
+  appearance?: string;
+  outfit?: string;
+  thoughts?: string;
+  /** Tracker-defined structured state such as Role, ClientStatus, occupation, etc. */
+  customFields?: Record<string, unknown>;
+  stats?: unknown[];
+  avatarPath?: string;
+  avatarCrop?: unknown;
 }
 
 export interface CapabilityResourceHost {
@@ -121,7 +154,12 @@ export interface CapabilityResourceHost {
   updatePersona?(personaId: string, updates: CapabilityPersonaUpdateInput): Promise<void>;
   createLorebook?(input: CapabilityLorebookCreateInput): Promise<CapabilityLorebookRecord>;
   updateLorebook?(lorebookId: string, updates: CapabilityLorebookUpdateInput): Promise<void>;
+  createLorebookEntry?(
+    lorebookId: string,
+    entry: CapabilityLorebookEntryInput,
+  ): Promise<CapabilityLorebookEntryRecord>;
   bulkCreateLorebookEntries?(lorebookId: string, entries: CapabilityLorebookEntryInput[]): Promise<void>;
+  updateLorebookEntry?(entryId: string, updates: CapabilityLorebookEntryUpdateInput): Promise<void>;
   removeLorebookEntry?(entryId: string): Promise<void>;
 }
 
@@ -337,6 +375,15 @@ export interface CapabilityPersistenceSession {
   listMessages(chatId: string): Promise<CapabilityMessageRecord[]>;
   /** Read-only. Optional so packages feature-detect and degrade on older Engines. */
   getGameState?(chatId: string): Promise<CapabilityGameStateRecord | null>;
+  /**
+   * Read authoritative Character Tracker state for one persisted message/swipe
+   * anchor so overlapping Roleplay generations cannot observe a newer turn.
+   */
+  getCharacterTrackerState?(
+    chatId: string,
+    messageId: string,
+    swipeIndex: number,
+  ): Promise<CapabilityTrackedCharacterRecord[]>;
   appendRoleplayEvent?(input: CapabilityRoleplayEventInput): Promise<CapabilityRoleplayEventRecord | null>;
   listExistingLorebookEntryIds(entryIds: string[]): Promise<string[]>;
   createMessageWithSwipe(input: CapabilityCreateMessageWithSwipeInput): Promise<CapabilityMessageRecord>;
@@ -368,3 +415,15 @@ export interface CapabilityRuntimeHost {
   persistence: CapabilityPersistenceHost;
   resources: CapabilityResourceHost;
 }
+
+/** Fired after ordinary post-processing results for an anchor are finalized and durably applied. */
+export interface CapabilityAgentPipelineSettledEvent {
+  chatId: string;
+  generationId: string;
+  messageId: string;
+  swipeIndex: number;
+}
+
+export type CapabilityAgentPipelineSettledHandler = (
+  event: CapabilityAgentPipelineSettledEvent,
+) => void | Promise<void>;

@@ -26,6 +26,7 @@ import { sidecarSpeechService } from "../sidecar/sidecar-speech.service.js";
 
 const ROOT = join(DATA_DIR, "capability-packages");
 const VERSIONS = join(ROOT, "versions");
+const LOCAL_IMPORTS = join(ROOT, "local-imports");
 const REGISTRY = join(ROOT, "installed.json");
 const UPDATE_DECISIONS = join(ROOT, "update-decisions-v1.json");
 const AVAILABILITY_MIGRATION = join(ROOT, "availability-migration-v1.json");
@@ -532,21 +533,23 @@ export function findPendingCapabilityPackageUpdates(
     }));
 }
 
-async function installCatalogPackage(entry: CapabilityCatalogPackage, activateDuringStartup = false) {
-  const { manifest, artifact } = entry;
-  const installIssue = getCapabilityPackageInstallIssue(manifest);
-  if (installIssue) throw new Error(installIssue);
-  const initiallyInstalled = (await readRegistry()).packages.find((item) => item.id === manifest.id);
-  assertNotDowngrade(initiallyInstalled, manifest.version);
-  const capabilityApiIssue = getCapabilityApiCompatibilityIssue(manifest);
-  if (capabilityApiIssue) throw new Error(capabilityApiIssue);
-  if (!supportsEngineVersion(entry, APP_VERSION)) {
-    throw new Error(`Package requires Marinara Engine ${manifest.engine.min} to below ${manifest.engine.maxExclusive}`);
+async function installPackageArchive(
+  archive: Buffer,
+  options: {
+    expectedManifest?: CapabilityCatalogPackage["manifest"];
+    expectedArtifactBytes?: number;
+    expectedArtifactSha256?: string;
+    activateDuringStartup?: boolean;
+  } = {},
+) {
+  if (archive.byteLength > MAX_ARTIFACT_BYTES) throw new Error("Package artifact is too large");
+  if (options.expectedArtifactBytes !== undefined && archive.byteLength !== options.expectedArtifactBytes) {
+    throw new Error("Downloaded package size does not match the catalog");
   }
-  const archive = await fetchBytes(artifact.url, Math.min(artifact.bytes + 1, MAX_ARTIFACT_BYTES));
-  if (archive.byteLength !== artifact.bytes) throw new Error("Downloaded package size does not match the catalog");
-  const digest = createHash("sha256").update(archive).digest("hex");
-  if (digest !== artifact.sha256) throw new Error("Downloaded package checksum does not match the catalog");
+  if (options.expectedArtifactSha256) {
+    const digest = createHash("sha256").update(archive).digest("hex");
+    if (digest !== options.expectedArtifactSha256) throw new Error("Downloaded package checksum does not match the catalog");
+  }
 
   const zip = new AdmZip(archive);
   const entries = validatePackageArchiveEntries(zip);
@@ -554,21 +557,41 @@ async function installCatalogPackage(entry: CapabilityCatalogPackage, activateDu
   if (!manifestEntry || manifestEntry.header.size > MAX_MANIFEST_BYTES) {
     throw new Error("Package manifest is missing or too large");
   }
+
   const installedManifest = capabilityPackageManifestSchema.parse(JSON.parse(manifestEntry.getData().toString("utf8")));
-  if (JSON.stringify(installedManifest) !== JSON.stringify(manifest)) {
+  if (options.expectedManifest && JSON.stringify(installedManifest) !== JSON.stringify(options.expectedManifest)) {
     throw new Error("Artifact manifest does not match the catalog");
   }
+
+  const manifest = installedManifest;
+  const installIssue = getCapabilityPackageInstallIssue(manifest);
+  if (installIssue) throw new Error(installIssue);
+  const initiallyInstalled = (await readRegistry()).packages.find((item) => item.id === manifest.id);
+  assertNotDowngrade(initiallyInstalled, manifest.version);
+  const capabilityApiIssue = getCapabilityApiCompatibilityIssue(manifest);
+  if (capabilityApiIssue) throw new Error(capabilityApiIssue);
+
+  const syntheticEntry = {
+    manifest,
+    artifact: {
+      url: "https://local.invalid/package.zip",
+      sha256: createHash("sha256").update(archive).digest("hex"),
+      bytes: archive.byteLength,
+    },
+  } as CapabilityCatalogPackage;
+  if (!supportsEngineVersion(syntheticEntry, APP_VERSION)) {
+    throw new Error(`Package requires Marinara Engine ${manifest.engine.min} to below ${manifest.engine.maxExclusive}`);
+  }
+
   const declaredFiles = new Map(installedManifest.files.map((file) => [normalizeArchivePath(file.path), file]));
-  if (declaredFiles.size !== installedManifest.files.length)
-    throw new Error("Package manifest declares duplicate files");
-  // Case-folded too: on the case-insensitive filesystems this app ships to,
-  // case-only "distinct" declarations extract onto a single file and the
-  // losing declaration's hash can never verify (review finding on #5091).
+  if (declaredFiles.size !== installedManifest.files.length) throw new Error("Package manifest declares duplicate files");
   const caseFoldedPaths = new Set(installedManifest.files.map((file) => normalizeArchivePath(file.path).toLowerCase()));
   if (caseFoldedPaths.size !== installedManifest.files.length)
     throw new Error("Package manifest declares files that collide on case-insensitive filesystems");
+
   const payloadEntries = entries.filter((item) => item.entryName !== "manifest.json");
   if (payloadEntries.length !== declaredFiles.size) throw new Error("Package contains undeclared or missing files");
+
   const verifiedFiles = new Map<string, Buffer>();
   for (const item of payloadEntries) {
     const name = normalizeArchivePath(item.entryName);
@@ -581,11 +604,13 @@ async function installCatalogPackage(entry: CapabilityCatalogPackage, activateDu
     }
     verifiedFiles.set(name, data);
   }
+
   for (const entrypoint of Object.values(installedManifest.entrypoints)) {
     if (entrypoint && !declaredFiles.has(normalizeArchivePath(entrypoint))) {
       throw new Error(`Package entrypoint is not declared: ${entrypoint}`);
     }
   }
+
   const agentDetailIds = installedManifest.contributions?.agentDetail?.agentIds ?? [];
   if (agentDetailIds.length > 0 && !installedManifest.entrypoints.client) {
     throw new Error("Agent detail contributions require a client entrypoint");
@@ -618,6 +643,7 @@ async function installCatalogPackage(entry: CapabilityCatalogPackage, activateDu
     await mkdir(dirname(destination), { recursive: true });
     await rm(destination, { recursive: true, force: true });
     await rename(temporary, destination);
+
     const registry = await readRegistry();
     const previous = registry.packages.find((item) => item.id === manifest.id);
     assertNotDowngrade(previous, manifest.version);
@@ -626,7 +652,7 @@ async function installCatalogPackage(entry: CapabilityCatalogPackage, activateDu
       version: manifest.version,
       manifest,
       installedAt: new Date().toISOString(),
-      status: manifest.restartRequired && !activateDuringStartup ? "restart-required" : "active",
+      status: manifest.restartRequired && !options.activateDuringStartup ? "restart-required" : "active",
       error: null,
       readiness: manifest.entrypoints.server ? "pending" : "ready",
       readinessError: null,
@@ -644,6 +670,27 @@ async function installCatalogPackage(entry: CapabilityCatalogPackage, activateDu
     await rm(temporary, { recursive: true, force: true });
   }
 }
+
+async function installCatalogPackage(entry: CapabilityCatalogPackage, activateDuringStartup = false) {
+  const { manifest, artifact } = entry;
+  const installIssue = getCapabilityPackageInstallIssue(manifest);
+  if (installIssue) throw new Error(installIssue);
+  const initiallyInstalled = (await readRegistry()).packages.find((item) => item.id === manifest.id);
+  assertNotDowngrade(initiallyInstalled, manifest.version);
+  const capabilityApiIssue = getCapabilityApiCompatibilityIssue(manifest);
+  if (capabilityApiIssue) throw new Error(capabilityApiIssue);
+  if (!supportsEngineVersion(entry, APP_VERSION)) {
+    throw new Error(`Package requires Marinara Engine ${manifest.engine.min} to below ${manifest.engine.maxExclusive}`);
+  }
+  const archive = await fetchBytes(artifact.url, Math.min(artifact.bytes + 1, MAX_ARTIFACT_BYTES));
+  return installPackageArchive(archive, {
+    expectedManifest: manifest,
+    expectedArtifactBytes: artifact.bytes,
+    expectedArtifactSha256: artifact.sha256,
+    activateDuringStartup,
+  });
+}
+
 
 export const capabilityPackageManager = {
   async catalog(fetchCatalog: typeof safeFetch = safeFetch): Promise<CapabilityCatalog> {
@@ -1000,6 +1047,21 @@ export const capabilityPackageManager = {
       );
     }
     return installCatalogPackage(entry);
+  },
+
+  /**
+   * Trusted local-development install path. Not exposed over HTTP.
+   * The artifact must live under DATA_DIR/capability-packages/local-imports.
+   */
+  async installLocalArtifact(filename: string) {
+    const name = filename.trim();
+    if (!name || name.includes("/") || name.includes("\\") || !name.toLowerCase().endsWith(".zip")) {
+      throw new Error("Local capability artifact filename is invalid");
+    }
+    const artifactPath = inside(LOCAL_IMPORTS, join(LOCAL_IMPORTS, name));
+    const archive = await readFile(artifactPath);
+    if (archive.byteLength > MAX_ARTIFACT_BYTES) throw new Error("Package artifact is too large");
+    return installPackageArchive(archive);
   },
 
   async uninstall(packageId: string) {
