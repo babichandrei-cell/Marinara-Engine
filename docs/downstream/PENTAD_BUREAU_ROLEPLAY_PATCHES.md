@@ -1,6 +1,6 @@
 # Pentad Bureau — Marinara Engine downstream Roleplay patches
 
-This document is the recovery checkpoint for the downstream Marinara Engine changes developed for The Pentad Bureau Roleplay setup. Its purpose is to make the intent, architecture, history, tests, and remaining work recoverable without relying on a previous chat session.
+This document is the recovery checkpoint for the downstream Marinara Engine changes developed for The Pentad Bureau Roleplay setup. Its purpose is to make the intent, architecture, history, tests, companion patch lineage, and remaining work recoverable without relying on a previous chat session.
 
 ## Repository topology
 
@@ -10,8 +10,9 @@ Development fork: `babichandrei-cell/Marinara-Engine`.
 - upstream repository: `Pasta-Devs/Marinara-Engine`
 - upstream remote: `upstream`
 - feature branch: `feature/global-tracker-character-identity`
-- pre-experiment base: `24453ecf0` (`merge: integrate Character Lore Sync support`)
-- feature head before this documentation commit: `0ad4d21d72c6d9bf642fc6867a015a12af95397c`
+- pre-experiment base: `24453ecf00cd02602ff1c593c440118dfe733b44` (`merge: integrate Character Lore Sync support`)
+- last functional feature commit before documentation: `0ad4d21d72c6d9bf642fc6867a015a12af95397c`
+- first recovery-documentation commit: `8a13593e6701d1351d2353dfc83403899e48aca3` (`docs: document downstream roleplay identity patches`)
 
 ## Why these patches exist
 
@@ -56,6 +57,63 @@ This downstream Character/Lore identity feature performs no additional LLM reque
 `promptCharacterIds + trackerLoreCharacterIds + bootstrapLoreCharacterIds`
 
 The existing upstream `selectSmartGroupResponders()` function is unrelated. It is Marinara's pre-existing smart group-response selector and may perform its own model request for responder selection. It was not introduced by this feature line.
+
+## Companion downstream patch lineage
+
+The Roleplay identity feature does not stand alone. A complete recovery of the tested Pentad Bureau Marinara environment must also account for the Engine support lineage that existed before `feature/global-tracker-character-identity`.
+
+### `marinara-empty-send-continue-v8`
+
+`marinara-empty-send-continue-v8` is the historical Roleplay prompt-only empty-send continuation patch from the same downstream lineage. It addresses the Roleplay continuation path where an empty send is intentionally used to continue generation rather than being treated as ordinary user text.
+
+Treat this name as a recovery marker for the historical patch artifact. The current tested Capability API patch described below already includes the Roleplay prompt-only empty-send continuation change, so do not blindly stack the historical empty-send patch on top of `capability-api-1.14-current.patch`. If reconstructing from older standalone artifacts, compare/apply-check first and avoid duplicating the same hunks.
+
+The exact standalone `marinara-empty-send-continue-v8` artifact location/hash is not currently recorded in this repository; preserve it separately when the original artifact is available.
+
+### `capability-api-1.14-current.patch`
+
+The current tested Capability API support patch is maintained in the companion repository:
+
+`babichandrei-cell/Marinara-extensions`
+
+at:
+
+`patches/capability-api-1.14/capability-api-1.14-current.patch`
+
+Its companion README records:
+
+- Marinara Engine baseline: `v2.4.3`
+- baseline commit: `34442e26d`
+- tested integration branch head: `24453ecf0`
+- SHA-256: `7e912ceb0aab3d0c3b1332840fc187956c07510c9b3e94968eda7990a2bd0639`
+
+The patch provides the Capability API 1.14 support required by Character Lore Sync, including:
+
+- agent-pipeline-settled lifecycle support;
+- authoritative Character Tracker reads anchored to persisted message/swipe state;
+- Character Tracker `customFields` passthrough;
+- capability LoreBook entry create/update surfaces;
+- Character LoreBook ownership links;
+- trusted local Capability Package artifact installation support;
+- embedded Character Book synchronization after capability Lore writes;
+- post-generation Character/Lore client cache reconciliation;
+- the related regression coverage committed with the Engine integration;
+- the Roleplay prompt-only empty-send continuation behavior from the earlier patch lineage.
+
+This patch was verified with `git apply --check` against clean Engine commit `34442e26d`. Do not assume it applies cleanly to later upstream Marinara versions without revalidation.
+
+### Relationship to the current feature branch
+
+`24453ecf00cd02602ff1c593c440118dfe733b44` is both the tested Capability API integration head and the pre-experiment base for the Character identity/Lore-scope feature documented here.
+
+Therefore the intended lineage is conceptually:
+
+`Marinara v2.4.3 / 34442e26d`
+→ Roleplay empty-send continuation lineage (`marinara-empty-send-continue-v8`)
+→ Capability API 1.14 / Character Lore Sync Engine support (`24453ecf0`)
+→ global Tracker Character identity and Lore eligibility feature (`b286c760b` → `a7be63ea` → `b7b59b8f` → `0ad4d21d`)
+
+When recovering or rebasing, preserve this ordering and re-test each responsibility independently.
 
 ## Feature history
 
@@ -182,6 +240,8 @@ Verified result:
 
 The modified Engine also successfully passed `pnpm build:shared` and `pnpm build:server` inside the Marinara builder Docker environment. `git diff --check` was clean before the feature commit.
 
+The Capability API 1.14 integration line has its own regression set in the Engine/extension archive, including capability lifecycle, Character Tracker anchor, LoreBook write, Character Lore contract/behavior, embedded Character Book synchronization, post-generation resource refresh, and Character Lore Sync semantics coverage. Keep those regressions conceptually separate from the Roleplay identity regression even though the tested environment contains both lines.
+
 ## Additional LLM-call audit
 
 The downstream commits between `24453ecf0` and feature head `0ad4d21d7` were audited for newly introduced model-call primitives such as `createLLMProvider`, `.generate(`, completion calls, selector prompts, and Character planning prompts.
@@ -196,7 +256,9 @@ The Engine feature line works together with the separate Character Lore Sync cap
 
 Character Lore Sync projects authoritative Character Tracker state into persistent Lore. The Engine identity work documented here is important because Character-specific semantics can only be attached reliably when Tracker state contains the canonical Character Card id.
 
-Keep the responsibilities separate: the Engine resolves identity and Lore eligibility; Character Lore Sync persists selected Tracker-derived state into Lore.
+Keep the responsibilities separate: the Engine resolves identity and Lore eligibility; Character Lore Sync persists selected Tracker-derived state into Lore; Capability API 1.14 supplies the Engine surfaces/lifecycle needed by Character Lore Sync.
+
+The Character Lore Sync release archive itself lives in `babichandrei-cell/Marinara-extensions` under `patches/character-lore-sync/`. Its release history and runtime-verification checkpoint should be treated as a companion source when reconstructing the complete tested environment.
 
 ## Important conceptual boundaries
 
@@ -207,9 +269,12 @@ Do not collapse these concepts into one variable:
 - Character Library identity;
 - prompt responder selection;
 - LoreBook ownership eligibility;
-- Lore entry activation.
+- Lore entry activation;
+- Character Lore Sync persistence;
+- Capability API lifecycle/resource support;
+- Roleplay empty-send continuation behavior.
 
-In particular, a Character can be off-roster but present in Tracker; a Character can be Lore-eligible without being added to the roster; an NPC can exist in Tracker without acquiring Character Card semantics; and smart responder selection is unrelated to Lore identity resolution.
+In particular, a Character can be off-roster but present in Tracker; a Character can be Lore-eligible without being added to the roster; an NPC can exist in Tracker without acquiring Character Card semantics; smart responder selection is unrelated to Lore identity resolution; and the empty-send continuation patch is a prompt-flow behavior, not an identity mechanism.
 
 ## Safe resume procedure
 
@@ -217,12 +282,16 @@ When returning to this work in a new session:
 
 1. Read this document first.
 2. Confirm branch and remotes.
-3. Inspect the four downstream commits after `24453ecf0`.
-4. Run the dedicated Roleplay Lore Character identity regression.
-5. Build shared + server in Docker.
-6. Inspect the runtime Lore identity debug line during a real Roleplay turn.
-7. Do not infer scene presence from Lore eligibility.
-8. Do not introduce an additional LLM call for Character/Lore identity unless a new requirement cannot be satisfied from deterministic state.
+3. Confirm the Engine base/integration lineage: `34442e26d` → `24453ecf0` → current feature branch.
+4. In `babichandrei-cell/Marinara-extensions`, inspect `patches/capability-api-1.14/README.md` and `capability-api-1.14-current.patch`.
+5. Remember that the tested Capability API patch already contains the Roleplay prompt-only empty-send continuation change associated with `marinara-empty-send-continue-v8`; do not duplicate-apply it without checking.
+6. Inspect the four functional identity/Lore commits after `24453ecf0`.
+7. Run the dedicated Roleplay Lore Character identity regression.
+8. Run/review the Capability API / Character Lore Sync regressions relevant to any Engine support changes.
+9. Build shared + server in Docker.
+10. Inspect the runtime Lore identity debug line during a real Roleplay turn.
+11. Do not infer scene presence from Lore eligibility.
+12. Do not introduce an additional LLM call for Character/Lore identity unless a new requirement cannot be satisfied from deterministic state.
 
 Useful commands:
 
@@ -235,12 +304,14 @@ git diff --check
 
 Expected feature branch: `feature/global-tracker-character-identity`.
 
-The last functional feature commit before this documentation checkpoint is `0ad4d21d72c6d9bf642fc6867a015a12af95397c`.
+The last functional feature commit before the recovery documentation is `0ad4d21d72c6d9bf642fc6867a015a12af95397c`.
+
+The initial recovery-documentation commit is `8a13593e6701d1351d2353dfc83403899e48aca3`; later documentation-only commits may follow it without changing the functional feature head.
 
 ## Known follow-up work
 
 This checkpoint documents the currently verified feature rather than declaring the larger Roleplay architecture finished.
 
-Future work should first determine whether a proposed change concerns identity canonicalization, Tracker scene presence, Lore scope, Lore activation, group responder selection, or Character Lore Sync persistence. Changes should be made at the narrowest correct layer instead of merging these responsibilities.
+Future work should first determine whether a proposed change concerns identity canonicalization, Tracker scene presence, Lore scope, Lore activation, group responder selection, Character Lore Sync persistence, Capability API support, or empty-send continuation behavior. Changes should be made at the narrowest correct layer instead of merging these responsibilities.
 
 Before changing identity semantics, extend `roleplay-lore-character-identity.regression.ts` with the failing case first.
