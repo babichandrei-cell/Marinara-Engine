@@ -250,6 +250,7 @@ import {
   loadTrackerCharacterIdentityCatalog,
   mergeTrackerCharacterIdentityCatalog,
   resolveLoreCharacterIdsFromText,
+  resolveLoreCharacterIdsFromTrackerState,
   canonicalizeGamePartySpeakerLabels,
   collectLatestTrackerCharacterHistory,
   createLocalSidecarGenerationConnection,
@@ -1880,16 +1881,30 @@ export async function generateRoutes(app: FastifyInstance) {
               )
             : [];
 
+        // LoreBook ownership/scope filtering happens before entry-level
+        // matching sees gameState.presentCharacters. Bridge previous
+        // authoritative Tracker Character Card identities into Lore scope so
+        // an off-roster Character remains eligible after its first turn.
+        const trackerLoreCharacterIds =
+          chatMode === "roleplay"
+            ? resolveLoreCharacterIdsFromTrackerState(
+                await selectedGameStateForPrompt(),
+                libraryCharacterIdentities,
+              )
+            : [];
+
         const loreCharacterIds = Array.from(
           new Set([
             ...promptCharacterIds,
+            ...trackerLoreCharacterIds,
             ...bootstrapLoreCharacterIds,
           ]),
         );
 
         logger.debug(
-          "[generate] Lore character ids: prompt=%j bootstrap=%j effective=%j",
+          "[generate] Lore character ids: prompt=%j tracker=%j bootstrap=%j effective=%j",
           promptCharacterIds,
+          trackerLoreCharacterIds,
           bootstrapLoreCharacterIds,
           loreCharacterIds,
         );

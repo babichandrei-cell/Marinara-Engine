@@ -1701,6 +1701,65 @@ export function resolveLoreCharacterIdsFromText(
   return [...matchedIds];
 }
 
+/**
+ * Resolve canonical Character Card identities from the previous authoritative
+ * Character Tracker state for Roleplay LoreBook scope.
+ *
+ * This bridge deliberately accepts only Tracker characterIds that correspond
+ * to real Character Library identities:
+ *
+ * - Character Cards remain Lore-eligible on later turns even when the current
+ *   user message no longer repeats their name;
+ * - NPCs and unknown/stale Tracker identities do not acquire Character-linked
+ *   LoreBook ownership scope;
+ * - the canonical Character Library id is returned even if Tracker id casing
+ *   differs;
+ * - this does not establish scene presence. Character Tracker remains the
+ *   authority for presence; this helper only projects an already-persisted
+ *   Tracker identity into Lore eligibility.
+ */
+export function resolveLoreCharacterIdsFromTrackerState(
+  gameState: Record<string, unknown> | null | undefined,
+  identities: CharacterIdentity[],
+): string[] {
+  if (!gameState || identities.length === 0) return [];
+
+  const presentCharacters = gameState.presentCharacters;
+  if (!Array.isArray(presentCharacters) || presentCharacters.length === 0) {
+    return [];
+  }
+
+  const canonicalIdsByKey = new Map(
+    identities
+      .map((identity) => {
+        const id = identity.id.trim();
+        return id ? [id.toLowerCase(), id] as const : null;
+      })
+      .filter(
+        (item): item is readonly [string, string] =>
+          item !== null,
+      ),
+  );
+
+  const matchedIds = new Set<string>();
+
+  for (const rawCharacter of presentCharacters) {
+    if (!isPlainRecord(rawCharacter)) continue;
+
+    const rawId =
+      typeof rawCharacter.characterId === "string"
+        ? rawCharacter.characterId.trim()
+        : "";
+
+    if (!rawId) continue;
+
+    const canonicalId = canonicalIdsByKey.get(rawId.toLowerCase());
+    if (canonicalId) matchedIds.add(canonicalId);
+  }
+
+  return [...matchedIds];
+}
+
 export function applyTrackerCharacterCardIdentity(
   characters: Array<Record<string, unknown>>,
   cards: CharacterIdentity[],
