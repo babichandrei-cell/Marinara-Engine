@@ -2223,7 +2223,7 @@ export async function generateRoutes(app: FastifyInstance) {
               (chatMeta.entryStateOverrides as Record<string, { ephemeral?: number | null; enabled?: boolean }>) ??
               undefined,
             entryTimingStates: (chatMeta.entryTimingStates as Record<string, LorebookEntryTimingState>) ?? undefined,
-            gameState: null,
+            gameState: await selectedGameStateForPrompt(),
             generationTriggers: lorebookGenerationTriggers,
             groupScenarioOverrideText:
               typeof chatMeta.groupScenarioText === "string" && (chatMeta.groupScenarioText as string).trim()
@@ -2769,9 +2769,13 @@ export async function generateRoutes(app: FastifyInstance) {
         // preset-driven chats get lorebook content via the preset assembler.
         if (!presetId && chatMode === "roleplay") {
           sendProgress("lorebooks");
-          const lorebookResult = await processLorebooks(app.db, toLorebookScanMessages(), null, {
-            chatId: input.chatId,
-            characterIds: promptCharacterIds,
+          const lorebookResult = await processLorebooks(
+            app.db,
+            toLorebookScanMessages(),
+            await selectedGameStateForPrompt(),
+            {
+              chatId: input.chatId,
+              characterIds: promptCharacterIds,
             personaId,
             activeLorebookIds: chatActiveLorebookIds,
             forcedEntryIds:
@@ -2787,9 +2791,10 @@ export async function generateRoutes(app: FastifyInstance) {
               (chatMeta.entryStateOverrides as Record<string, { ephemeral?: number | null; enabled?: boolean }>) ??
               undefined,
             entryTimingStates: (chatMeta.entryTimingStates as Record<string, LorebookEntryTimingState>) ?? undefined,
-            generationTriggers: lorebookGenerationTriggers,
-            resolveContent: resolvePromptMacrosForLorebook,
-          });
+              generationTriggers: lorebookGenerationTriggers,
+              resolveContent: resolvePromptMacrosForLorebook,
+            },
+          );
           lorebookPromptScanResult = lorebookResult;
           lorebookScanSnapshot = toLorebookScanSnapshot(lorebookResult);
           rememberKnowledgeRouterActivatedLorebookIds(
