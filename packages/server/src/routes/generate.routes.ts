@@ -246,6 +246,8 @@ import {
   buildLockedInventoryTrackerPatch,
   buildLockedPersonaTrackerPatch,
   applyTrackerCharacterCardIdentity,
+  loadTrackerCharacterIdentityCatalog,
+  mergeTrackerCharacterIdentityCatalog,
   canonicalizeGamePartySpeakerLabels,
   collectLatestTrackerCharacterHistory,
   createLocalSidecarGenerationConnection,
@@ -8466,7 +8468,22 @@ export async function generateRoutes(app: FastifyInstance) {
                   snapBeforeUpdate ??
                   trackerBaseGameStateSnapshot ??
                   (allowLatestGameStateFallback ? await gameStateStore.getLatest(input.chatId) : null);
-                const cardCharacterIds = applyTrackerCharacterCardIdentity(chars, charInfo);
+                const libraryCharacterIdentities = await loadTrackerCharacterIdentityCatalog(
+                  () => createCharactersStorage(app.db).list(),
+                  (error) =>
+                    logger.warn(
+                      error,
+                      "[generate] Failed to load Character Library identity catalog for tracker canonicalization",
+                    ),
+                );
+                const trackerIdentityCatalog = mergeTrackerCharacterIdentityCatalog(
+                  charInfo,
+                  libraryCharacterIdentities,
+                );
+                const cardCharacterIds = applyTrackerCharacterCardIdentity(
+                  chars,
+                  trackerIdentityCatalog,
+                );
                 const oldChars = parseJsonField<any[]>(previousCharacterSnapshot?.presentCharacters, []);
                 preserveTrackerCharacterUiFields(chars, oldChars);
                 preserveTrackerCharacterUiFields(chars, characterTrackerHistory);
