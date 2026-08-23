@@ -246,8 +246,10 @@ import {
   buildLockedInventoryTrackerPatch,
   buildLockedPersonaTrackerPatch,
   applyTrackerCharacterCardIdentity,
+  loadCharacterIdentityCatalog,
   loadTrackerCharacterIdentityCatalog,
   mergeTrackerCharacterIdentityCatalog,
+  resolveLoreCharacterIdsFromText,
   canonicalizeGamePartySpeakerLabels,
   collectLatestTrackerCharacterHistory,
   createLocalSidecarGenerationConnection,
@@ -1860,6 +1862,38 @@ export async function generateRoutes(app: FastifyInstance) {
             ? input.forCharacterId
             : null;
         const promptCharacterIds = resolvePromptCharacterIdsForTarget(characterIds, promptTargetCharacterId);
+
+        const libraryCharacterIdentities = await loadCharacterIdentityCatalog(
+          () => createCharactersStorage(app.db).list(),
+          (error) =>
+            logger.warn(
+              error,
+              "[generate] Failed to load Character Library identity catalog for Lore bootstrap",
+            ),
+        );
+
+        const bootstrapLoreCharacterIds =
+          chatMode === "roleplay"
+            ? resolveLoreCharacterIdsFromText(
+                currentUserInputContent() ?? "",
+                libraryCharacterIdentities,
+              )
+            : [];
+
+        const loreCharacterIds = Array.from(
+          new Set([
+            ...promptCharacterIds,
+            ...bootstrapLoreCharacterIds,
+          ]),
+        );
+
+        logger.debug(
+          "[generate] Lore character ids: prompt=%j bootstrap=%j effective=%j",
+          promptCharacterIds,
+          bootstrapLoreCharacterIds,
+          loreCharacterIds,
+        );
+
         const deferConversationLorebookScanToResponder =
           chatMode === "conversation" &&
           characterIds.length > 1 &&
@@ -2077,7 +2111,7 @@ export async function generateRoutes(app: FastifyInstance) {
             const allLorebooks = (await lorebooksStore.list()) as unknown as Lorebook[];
             const relevantLorebooks = filterRelevantLorebooks(allLorebooks, {
               chatId: input.chatId,
-              characterIds: promptCharacterIds,
+              characterIds: loreCharacterIds,
               personaId,
               activeLorebookIds: chatActiveLorebookIds,
               excludedLorebookIds: lorebookScopeExclusions.excludedLorebookIds,
@@ -2109,7 +2143,7 @@ export async function generateRoutes(app: FastifyInstance) {
         try {
           const lorebookScopeFilters = {
             chatId: input.chatId,
-            characterIds: promptCharacterIds,
+            characterIds: loreCharacterIds,
             personaId,
             activeLorebookIds: chatActiveLorebookIds,
             excludedLorebookIds: lorebookScopeExclusions.excludedLorebookIds,
@@ -2190,6 +2224,7 @@ export async function generateRoutes(app: FastifyInstance) {
             localVariables: chatMacroVariables,
             chatId: input.chatId,
             characterIds: promptCharacterIds,
+            loreCharacterIds,
             groupCharacterIds: characterIds,
             personaId,
             personaName,
@@ -2775,22 +2810,22 @@ export async function generateRoutes(app: FastifyInstance) {
             await selectedGameStateForPrompt(),
             {
               chatId: input.chatId,
-              characterIds: promptCharacterIds,
-            personaId,
-            activeLorebookIds: chatActiveLorebookIds,
-            forcedEntryIds:
-              ownerSpatialProjection?.ownerMode === "roleplay" ? ownerSpatialProjection.lorebookEntryIds : [],
-            excludedLorebookIds: lorebookScopeExclusions.excludedLorebookIds,
-            excludedSourceAgentIds: lorebookScopeExclusions.excludedSourceAgentIds,
-            tokenBudget: resolveLorebookTokenBudget(chatMeta),
-            chatEmbedding: chatContextEmbedding,
-            semanticEmbeddingsByLorebookId: lorebookSemanticEmbeddingsById,
-            semanticEmbeddingSpaceId: lorebookSemanticEmbeddingSpaceId,
-            semanticSimilarityBaseline: lorebookSemanticSimilarityBaseline,
-            entryStateOverrides:
-              (chatMeta.entryStateOverrides as Record<string, { ephemeral?: number | null; enabled?: boolean }>) ??
-              undefined,
-            entryTimingStates: (chatMeta.entryTimingStates as Record<string, LorebookEntryTimingState>) ?? undefined,
+              characterIds: loreCharacterIds,
+              personaId,
+              activeLorebookIds: chatActiveLorebookIds,
+              forcedEntryIds:
+                ownerSpatialProjection?.ownerMode === "roleplay" ? ownerSpatialProjection.lorebookEntryIds : [],
+              excludedLorebookIds: lorebookScopeExclusions.excludedLorebookIds,
+              excludedSourceAgentIds: lorebookScopeExclusions.excludedSourceAgentIds,
+              tokenBudget: resolveLorebookTokenBudget(chatMeta),
+              chatEmbedding: chatContextEmbedding,
+              semanticEmbeddingsByLorebookId: lorebookSemanticEmbeddingsById,
+              semanticEmbeddingSpaceId: lorebookSemanticEmbeddingSpaceId,
+              semanticSimilarityBaseline: lorebookSemanticSimilarityBaseline,
+              entryStateOverrides:
+                (chatMeta.entryStateOverrides as Record<string, { ephemeral?: number | null; enabled?: boolean }>) ??
+                undefined,
+              entryTimingStates: (chatMeta.entryTimingStates as Record<string, LorebookEntryTimingState>) ?? undefined,
               generationTriggers: lorebookGenerationTriggers,
               resolveContent: resolvePromptMacrosForLorebook,
             },

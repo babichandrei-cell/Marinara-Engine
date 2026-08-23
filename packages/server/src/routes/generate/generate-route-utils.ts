@@ -1453,9 +1453,10 @@ export function collectLatestTrackerCharacterHistory(
   return history;
 }
 
-export type TrackerCharacterCardIdentity = {
+export type CharacterIdentity = {
   id: string;
   name: string;
+  aliases?: string[];
   avatarPath?: string | null;
   avatarCrop?: unknown;
 };
@@ -1526,7 +1527,7 @@ export function canonicalizeGamePartySpeakerLabels(content: string, canonicalNam
  * exists only so tracker output can resolve a known library character to its
  * stable Character Card id without requiring chat roster membership.
  */
-export async function loadTrackerCharacterIdentityCatalog(
+export async function loadCharacterIdentityCatalog(
   loadCharacters: () => Promise<
     Array<{
       id: string;
@@ -1535,7 +1536,7 @@ export async function loadTrackerCharacterIdentityCatalog(
     }>
   >,
   onError?: (error: unknown) => void,
-): Promise<TrackerCharacterCardIdentity[]> {
+): Promise<CharacterIdentity[]> {
   let rows: Array<{
     id: string;
     data: string;
@@ -1549,7 +1550,7 @@ export async function loadTrackerCharacterIdentityCatalog(
     return [];
   }
 
-  const identities: TrackerCharacterCardIdentity[] = [];
+  const identities: CharacterIdentity[] = [];
 
   for (const row of rows) {
     const id = typeof row.id === "string" ? row.id.trim() : "";
@@ -1568,9 +1569,18 @@ export async function loadTrackerCharacterIdentityCatalog(
       // library identities available for off-roster roleplay matching.
       if (extensions?.isBuiltInAssistant === true) continue;
 
+      const aliases = Array.from(
+        new Set(
+          (Array.isArray(data.tags) ? data.tags.map(String) : [])
+            .map((value) => value.trim())
+            .filter(Boolean),
+        ),
+      );
+
       identities.push({
         id,
         name,
+        aliases,
         avatarPath:
           typeof row.avatarPath === "string" && row.avatarPath.trim()
             ? row.avatarPath
@@ -1586,6 +1596,12 @@ export async function loadTrackerCharacterIdentityCatalog(
 }
 
 /**
+ * Backward-compatible name used by the current Tracker canonicalization
+ * experiment. New identity consumers should use loadCharacterIdentityCatalog.
+ */
+export const loadTrackerCharacterIdentityCatalog = loadCharacterIdentityCatalog;
+
+/**
  * Merge roster identities with the wider Character Library without weakening
  * existing roster semantics.
  *
@@ -1595,9 +1611,9 @@ export async function loadTrackerCharacterIdentityCatalog(
  * refuses name-based matching for them.
  */
 export function mergeTrackerCharacterIdentityCatalog(
-  rosterCards: TrackerCharacterCardIdentity[],
-  libraryCards: TrackerCharacterCardIdentity[],
-): TrackerCharacterCardIdentity[] {
+  rosterCards: CharacterIdentity[],
+  libraryCards: CharacterIdentity[],
+): CharacterIdentity[] {
   const rosterIds = new Set(
     rosterCards.map((card) => card.id.trim().toLowerCase()).filter(Boolean),
   );
@@ -1615,12 +1631,82 @@ export function mergeTrackerCharacterIdentityCatalog(
   ];
 }
 
+/**
+ * Resolve Character Library identities explicitly referenced in the supplied
+ * text using canonical Character Card names and user-maintained Character
+ * Card tags as aliases.
+ *
+ * Matching is deliberately conservative:
+ * - aliases are case-insensitive Unicode literals;
+ * - aliases must be bounded by non-letter/non-number characters;
+ * - an alias is usable only when it belongs to exactly one library identity;
+ * - matching never mutates chat roster or Character Tracker state.
+ *
+ * This helper is intended for current-turn Lore eligibility, not physical
+ * scene-presence authority.
+ */
+export function resolveLoreCharacterIdsFromText(
+  text: string,
+  identities: CharacterIdentity[],
+): string[] {
+  if (!text.trim() || identities.length === 0) return [];
+
+  const identitiesByAlias = new Map<string, CharacterIdentity>();
+  const ambiguousAliases = new Set<string>();
+
+  for (const identity of identities) {
+    for (const rawAlias of [identity.name, ...(identity.aliases ?? [])]) {
+      const alias = rawAlias.trim();
+      const normalizedAlias = normalizeTextForMatch(alias);
+      if (!normalizedAlias) continue;
+
+      const existing = identitiesByAlias.get(normalizedAlias);
+      if (existing && existing.id !== identity.id) {
+        ambiguousAliases.add(normalizedAlias);
+        continue;
+      }
+      if (!ambiguousAliases.has(normalizedAlias)) {
+        identitiesByAlias.set(normalizedAlias, identity);
+      }
+    }
+  }
+
+  for (const alias of ambiguousAliases) {
+    identitiesByAlias.delete(alias);
+  }
+
+  const matchedIds = new Set<string>();
+
+  for (const [normalizedAlias, identity] of identitiesByAlias) {
+    const sourceAlias =
+      [identity.name, ...(identity.aliases ?? [])].find(
+        (candidate) => normalizeTextForMatch(candidate) === normalizedAlias,
+      ) ?? normalizedAlias;
+
+    const escaped = sourceAlias
+      .trim()
+      .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+      .replace(/\s+/g, "\\s+");
+
+    if (!escaped) continue;
+
+    const pattern = new RegExp(
+      `(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`,
+      "iu",
+    );
+
+    if (pattern.test(text)) matchedIds.add(identity.id);
+  }
+
+  return [...matchedIds];
+}
+
 export function applyTrackerCharacterCardIdentity(
   characters: Array<Record<string, unknown>>,
-  cards: TrackerCharacterCardIdentity[],
+  cards: CharacterIdentity[],
 ): Set<string> {
   const cardsById = new Map(cards.map((card) => [card.id.trim().toLowerCase(), card]));
-  const cardsByName = new Map<string, TrackerCharacterCardIdentity>();
+  const cardsByName = new Map<string, CharacterIdentity>();
   const duplicateNames = new Set<string>();
   for (const card of cards) {
     const name = normalizeTextForMatch(card.name);

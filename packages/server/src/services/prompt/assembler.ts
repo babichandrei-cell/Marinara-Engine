@@ -179,6 +179,8 @@ export interface AssemblerInput {
   /** Chat context */
   chatId: string;
   characterIds: string[];
+  /** Character ids used only for LoreBook scoping/filtering. */
+  loreCharacterIds?: string[];
   /** Full active roster when characterIds is narrowed to one generation target. */
   groupCharacterIds?: string[];
   personaId?: string | null;
@@ -512,6 +514,7 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
     db: input.db,
     chatId: input.chatId,
     characterIds: input.characterIds,
+    loreCharacterIds: input.loreCharacterIds,
     personaId: input.personaId ?? null,
     personaName: input.personaName,
     personaDescription: input.personaDescription,
