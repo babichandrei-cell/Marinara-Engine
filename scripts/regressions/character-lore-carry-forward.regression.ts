@@ -44,8 +44,8 @@ assert.equal(
 );
 assert.match(
   generateRoute,
-  /new Set\(\[\.\.\.promptCharacterIds, \.\.\.trackerCarryForwardCharacterIds\]\)/u,
-  "standard lore character scope must union prompt roster IDs with canonical Tracker carry-forward IDs",
+  /new Set\(\[\.\.\.promptCharacterIds, \.\.\.trackerCarryForwardCharacterIds(?:, \.\.\.registryCharacterIds)?\]\)/u,
+  "standard lore character scope must include prompt roster IDs and canonical Tracker carry-forward IDs, with optional lore-only registry IDs",
 );
 assert.match(
   generateRoute,
