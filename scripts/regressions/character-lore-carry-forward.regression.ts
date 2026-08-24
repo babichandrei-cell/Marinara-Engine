@@ -18,6 +18,23 @@ assert.match(
   /CHARACTER_LORE_CARRY_FORWARD_V1/u,
   "generation route must contain the deterministic Character Lore carry-forward block",
 );
+assert.equal(
+  (generateRoute.match(/CHARACTER_LORE_CARRY_FORWARD_V1/gu) ?? []).length,
+  1,
+  "generation route must contain exactly one carry-forward block",
+);
+
+const carryForwardMarkerIndex = generateRoute.indexOf("// CHARACTER_LORE_CARRY_FORWARD_V1");
+const optionalPreGenGateIndex = generateRoute.indexOf(
+  "if (shouldRunDirectorSecretPlot || shouldRunPreGen || shouldRunKR || shouldRunRouter)",
+);
+assert.ok(carryForwardMarkerIndex >= 0, "carry-forward marker must exist");
+assert.ok(optionalPreGenGateIndex >= 0, "optional pre-generation gate must exist");
+assert.ok(
+  carryForwardMarkerIndex < optionalPreGenGateIndex,
+  "carry-forward must execute independently of the optional pre-generation/KR/Router gate",
+);
+
 assert.match(
   generateRoute,
   /Array\.isArray\(gameState\?\.presentCharacters\)/u,
