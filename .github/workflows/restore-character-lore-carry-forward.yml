@@ -10,6 +10,10 @@ on:
       - scripts/patches/activate-character-lore-registries.py
       - scripts/regressions/character-lore-carry-forward.regression.ts
       - scripts/regressions/character-lore-registry-activation.regression.ts
+      - packages/server/src/services/prompt/index.ts
+      - packages/server/src/services/prompt/assembler.ts
+      - packages/server/src/routes/generate.routes.ts
+      - packages/server/src/services/agents/agent-executor.ts
   workflow_dispatch:
 
 permissions:
