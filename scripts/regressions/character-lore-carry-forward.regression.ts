@@ -6,6 +6,7 @@ const root = resolve(import.meta.dirname, "../..");
 const generateRoute = readFileSync(resolve(root, "packages/server/src/routes/generate.routes.ts"), "utf8");
 const agentExecutor = readFileSync(resolve(root, "packages/server/src/services/agents/agent-executor.ts"), "utf8");
 const promptIndex = readFileSync(resolve(root, "packages/server/src/services/prompt/index.ts"), "utf8");
+const assembler = readFileSync(resolve(root, "packages/server/src/services/prompt/assembler.ts"), "utf8");
 
 assert.match(
   promptIndex,
@@ -15,24 +16,63 @@ assert.match(
 
 assert.match(
   generateRoute,
+  /CHARACTER_LORE_EFFECTIVE_IDS_V1/u,
+  "generation route must resolve carried canonical IDs before standard lorebook assembly",
+);
+assert.match(
+  generateRoute,
+  /new Set\(\[\.\.\.promptCharacterIds, \.\.\.trackerCarryForwardCharacterIds\]\)/u,
+  "standard lore character scope must union prompt roster IDs with canonical Tracker carry-forward IDs",
+);
+assert.match(
+  generateRoute,
+  /characterIds: effectiveLorebookCharacterIds/u,
+  "semantic lore scope discovery must use the effective request-scoped lore character IDs",
+);
+assert.match(
+  generateRoute,
+  /lorebookCharacterIds: effectiveLorebookCharacterIds/u,
+  "preset assembler must receive the effective request-scoped lore character IDs separately from roster IDs",
+);
+assert.match(
+  assembler,
+  /lorebookCharacterIds\?: string\[\]/u,
+  "assembler must expose a lore-only character ID scope",
+);
+assert.match(
+  assembler,
+  /characterIds: input\.lorebookCharacterIds \?\? input\.characterIds/u,
+  "lore marker matching must use lore-only character IDs while preserving normal roster/card semantics",
+);
+
+assert.match(
+  generateRoute,
   /CHARACTER_LORE_CARRY_FORWARD_V1/u,
-  "generation route must contain the deterministic Character Lore carry-forward block",
+  "generation route must contain the deterministic Character Card carry-forward block",
 );
 assert.equal(
   (generateRoute.match(/CHARACTER_LORE_CARRY_FORWARD_V1/gu) ?? []).length,
   1,
-  "generation route must contain exactly one carry-forward block",
+  "generation route must contain exactly one carry-forward card-context block",
 );
 
 const carryForwardMarkerIndex = generateRoute.indexOf("// CHARACTER_LORE_CARRY_FORWARD_V1");
 const optionalPreGenGateIndex = generateRoute.indexOf(
   "if (shouldRunDirectorSecretPlot || shouldRunPreGen || shouldRunKR || shouldRunRouter)",
 );
+const effectiveIdsMarkerIndex = generateRoute.indexOf("// CHARACTER_LORE_EFFECTIVE_IDS_V1");
+const embeddingIndex = generateRoute.indexOf("// ── Compute chat embedding for semantic lorebook matching");
+assert.ok(effectiveIdsMarkerIndex >= 0, "effective lore character ID marker must exist");
+assert.ok(embeddingIndex >= 0, "embedding/lore assembly phase must exist");
+assert.ok(
+  effectiveIdsMarkerIndex < embeddingIndex,
+  "canonical Tracker IDs must be resolved before standard lorebook scope discovery and prompt assembly",
+);
 assert.ok(carryForwardMarkerIndex >= 0, "carry-forward marker must exist");
 assert.ok(optionalPreGenGateIndex >= 0, "optional pre-generation gate must exist");
 assert.ok(
   carryForwardMarkerIndex < optionalPreGenGateIndex,
-  "carry-forward must execute independently of the optional pre-generation/KR/Router gate",
+  "carry-forward card context must execute independently of the optional pre-generation/KR/Router gate",
 );
 
 assert.match(
@@ -53,7 +93,7 @@ assert.match(
 assert.match(
   generateRoute,
   /buildReferencedCharacterContext\(\{/u,
-  "carried Character Cards must use Marinara's referenced-character context builder so attached Character Lore is included",
+  "carried Character Cards must use Marinara's referenced-character context builder",
 );
 assert.match(
   generateRoute,
@@ -63,7 +103,7 @@ assert.match(
 assert.match(
   generateRoute,
   /finalMessages = injectAtDepth\(finalMessages/u,
-  "carried Character Card/Lore context must reach the main model",
+  "carried Character Card context must reach the main model",
 );
 
 assert.match(
@@ -74,7 +114,7 @@ assert.match(
 assert.match(
   agentExecutor,
   /context\.memory\._activatedCharacterContext/u,
-  "Character Tracker must receive the same card/lore context as the main model",
+  "Character Tracker must receive the same card context as the main model",
 );
 assert.match(
   agentExecutor,
