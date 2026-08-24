@@ -246,6 +246,8 @@ import {
   buildLockedInventoryTrackerPatch,
   buildLockedPersonaTrackerPatch,
   applyTrackerCharacterCardIdentity,
+  loadTrackerCharacterIdentityCatalog,
+  mergeTrackerCharacterIdentityCatalog,
   canonicalizeGamePartySpeakerLabels,
   collectLatestTrackerCharacterHistory,
   createLocalSidecarGenerationConnection,
@@ -370,6 +372,7 @@ import {
 import { runTurnGameBotTurns } from "../services/turn-games/turn-game-bot-runner.service.js";
 import { getTurnGameContextBuilder } from "../services/turn-games/turn-game-runner.service.js";
 import { getCapabilityService } from "../services/capability-packages/capability-service-registry.service.js";
+import { dispatchCapabilityAgentPipelineSettled } from "../services/capability-packages/capability-agent-lifecycle.service.js";
 import { normalizeContextInjections } from "./generate/agent-normalizers.js";
 import {
   buildGenerationPromptPresetCandidates,
@@ -1474,6 +1477,16 @@ export async function generateRoutes(app: FastifyInstance) {
       const mappedMessages: GenerationPromptMessage[] = [];
       for (const message of chatMessages) {
         mappedMessages.push(await mapChatHistoryMessageForPrompt(message));
+      }
+
+      // Empty Send in Roleplay is a prompt-only user turn. It must reach the
+      // model as a normal user message, but must never be persisted or shown.
+      if (chatMode === "roleplay" && input.roleplayContinue) {
+        mappedMessages.push({
+          role: "user",
+          content: "Continue the story.",
+          contextKind: "injection",
+        });
       }
 
       // Attach current request's provider inputs to the last user message (they're already saved in extra,
@@ -7902,15 +7915,64 @@ export async function generateRoutes(app: FastifyInstance) {
             return { ...result, data: spriteData };
           };
 
-          let postResults = hasPostProcessingAgents
-            ? [
-                ...(await pipeline.postGenerate(completedResponse, {
-                  preGenInjections: contextInjections,
-                  parallelResults,
-                })),
-                ...parallelResults,
-              ]
-            : [...parallelResults];
+          const postGenerateOptions = {
+            preGenInjections: contextInjections,
+            parallelResults,
+          };
+          const hasCharacterTrackerPostAgent = pipelineAgents.some(
+            (agent) => agent.phase === "post_processing" && agent.type === "character-tracker",
+          );
+          const hasIllustratorPostAgent = pipelineAgents.some(
+            (agent) => agent.phase === "post_processing" && agent.type === "illustrator",
+          );
+          let postResults: AgentResult[];
+          if (hasPostProcessingAgents && hasCharacterTrackerPostAgent && hasIllustratorPostAgent) {
+            // Illustrator needs the Character Tracker's current-turn clothing and appearance,
+            // whereas all other post agents may still run while Tracker is completing. Keep
+            // Tracker to one call, then give only Illustrator its fresh result — not a Lorebook
+            // rescan or a mutable game-state write that could affect unrelated agents.
+            const [characterTrackerResults, otherPostResults] = await Promise.all([
+              pipeline.postGenerate(completedResponse, {
+                ...postGenerateOptions,
+                agentTypeFilter: (agentType) => agentType === "character-tracker",
+              }),
+              pipeline.postGenerate(completedResponse, {
+                ...postGenerateOptions,
+                agentTypeFilter: (agentType) => agentType !== "character-tracker" && agentType !== "illustrator",
+              }),
+            ]);
+            const currentTurnCharacterTrackerUpdate = characterTrackerResults.find((result) => {
+              const data = result.data as Record<string, unknown> | null;
+              return (
+                result.success &&
+                result.type === "character_tracker_update" &&
+                Array.isArray(data?.presentCharacters) &&
+                data.presentCharacters.length > 0
+              );
+            })?.data as Record<string, unknown> | undefined;
+            const illustratorContext: AgentContext = currentTurnCharacterTrackerUpdate
+              ? {
+                  ...postAgentContext,
+                  memory: {
+                    ...postAgentContext.memory,
+                    _currentTurnCharacterTrackerUpdate: currentTurnCharacterTrackerUpdate.presentCharacters,
+                  },
+                }
+              : postAgentContext;
+            const illustratorResults = await pipeline.postGenerate(completedResponse, {
+              ...postGenerateOptions,
+              context: illustratorContext,
+              agentTypeFilter: (agentType) => agentType === "illustrator",
+            });
+            postResults = [...characterTrackerResults, ...otherPostResults, ...illustratorResults, ...parallelResults];
+          } else if (hasPostProcessingAgents) {
+            postResults = [
+              ...(await pipeline.postGenerate(completedResponse, postGenerateOptions)),
+              ...parallelResults,
+            ];
+          } else {
+            postResults = [...parallelResults];
+          }
 
           if (lorebookKeeperAgent) {
             const historicalLorebookTarget = getLorebookKeeperAutomaticTarget(
@@ -8455,7 +8517,22 @@ export async function generateRoutes(app: FastifyInstance) {
                   snapBeforeUpdate ??
                   trackerBaseGameStateSnapshot ??
                   (allowLatestGameStateFallback ? await gameStateStore.getLatest(input.chatId) : null);
-                const cardCharacterIds = applyTrackerCharacterCardIdentity(chars, charInfo);
+                const libraryCharacterIdentities = await loadTrackerCharacterIdentityCatalog(
+                  () => createCharactersStorage(app.db).list(),
+                  (error) =>
+                    logger.warn(
+                      error,
+                      "[generate] Failed to load Character Library identity catalog for tracker canonicalization",
+                    ),
+                );
+                const trackerIdentityCatalog = mergeTrackerCharacterIdentityCatalog(
+                  charInfo,
+                  libraryCharacterIdentities,
+                );
+                const cardCharacterIds = applyTrackerCharacterCardIdentity(
+                  chars,
+                  trackerIdentityCatalog,
+                );
                 const oldChars = parseJsonField<any[]>(previousCharacterSnapshot?.presentCharacters, []);
                 preserveTrackerCharacterUiFields(chars, oldChars);
                 preserveTrackerCharacterUiFields(chars, characterTrackerHistory);
@@ -9630,6 +9707,15 @@ export async function generateRoutes(app: FastifyInstance) {
           // ── Text rewrite/editing agents: run after ALL other agents ──
           const originalResponseBeforeRewrite = completedResponse;
           let textRewriteApplied = false;
+          if (messageId) {
+            await dispatchCapabilityAgentPipelineSettled({
+              chatId: input.chatId,
+              generationId,
+              messageId,
+              swipeIndex: targetSwipeIndex,
+            });
+          }
+
           if (activatedTextRewriteRunAgents.length > 0 && messageId && !abortController.signal.aborted) {
             let currentResponseForRewrite = originalResponseBeforeRewrite;
 

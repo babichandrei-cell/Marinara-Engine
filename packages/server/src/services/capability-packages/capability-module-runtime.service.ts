@@ -8,6 +8,7 @@ import type { FastifyInstance } from "fastify";
 import {
   registerTurnGameEngine,
   type AnyTurnGameEngine,
+  type CapabilityAgentPipelineSettledHandler,
   type CapabilityRuntimeHost,
   type CapabilityRuntimeLogArgument,
   type InstalledCapabilityPackage,
@@ -24,6 +25,7 @@ import {
   type CapabilityConversationCommandRegistration,
 } from "./capability-command-registry.service.js";
 import { registerCapabilityService } from "./capability-service-registry.service.js";
+import { registerCapabilityAgentPipelineSettledHandler } from "./capability-agent-lifecycle.service.js";
 import { createCapabilityLanguageModelHost } from "./capability-language-model.service.js";
 import {
   createCapabilityEmbeddingHost,
@@ -47,6 +49,7 @@ type CapabilityActivationContext = {
     registerTurnGameEngine(engine: AnyTurnGameEngine): Cleanup;
     registerConversationCommand(registration: CapabilityConversationCommandRegistration): Cleanup;
     registerService<T>(key: string, service: T): Cleanup;
+    registerAgentPipelineSettledHandler(handler: CapabilityAgentPipelineSettledHandler): Cleanup;
     /** Contribute text to each turn's system prompt. Requires the `prompt-context` permission. */
     registerPromptContext(contributor: CapabilityPromptContextContributor): Cleanup;
     registerPrivilegedRoutes(
@@ -213,6 +216,14 @@ class CapabilityModuleRuntime {
             return trackCleanup(registerCapabilityConversationCommand(registration));
           },
           registerService: (key, service) => trackCleanup(registerCapabilityService(key, service)),
+          registerAgentPipelineSettledHandler: (handler) => {
+            if (!installed.manifest.permissions?.includes("agent-runtime")) {
+              throw new Error(
+                `Capability package ${installed.id} must declare the "agent-runtime" permission to observe agent lifecycle`,
+              );
+            }
+            return trackCleanup(registerCapabilityAgentPipelineSettledHandler(handler));
+          },
           // Gated on the permission the manifest already declares, so a package can't reach the prompt
           // without asking for it up front. Contract in capability-prompt-context.service.ts.
           registerPromptContext: (contributor) => {

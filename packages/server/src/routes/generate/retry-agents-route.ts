@@ -122,6 +122,8 @@ import {
   buildLockedInventoryTrackerPatch,
   buildLockedPersonaTrackerPatch,
   applyTrackerCharacterCardIdentity,
+  loadTrackerCharacterIdentityCatalog,
+  mergeTrackerCharacterIdentityCatalog,
   collectLatestTrackerCharacterHistory,
   isMessageHiddenFromAI,
   parseExtra,
@@ -2694,7 +2696,22 @@ async function applyRetryResultEffects(args: {
             previousCharacters = [];
           }
         }
-        applyTrackerCharacterCardIdentity(presentCharacters, agentContext.characters);
+        const libraryCharacterIdentities = await loadTrackerCharacterIdentityCatalog(
+          () => createCharactersStorage(app.db).list(),
+          (error) =>
+            logger.warn(
+              error,
+              "[retry-agents] Failed to load Character Library identity catalog for tracker canonicalization",
+            ),
+        );
+        const trackerIdentityCatalog = mergeTrackerCharacterIdentityCatalog(
+          agentContext.characters,
+          libraryCharacterIdentities,
+        );
+        applyTrackerCharacterCardIdentity(
+          presentCharacters,
+          trackerIdentityCatalog,
+        );
         preserveTrackerCharacterUiFields(presentCharacters, previousCharacters);
         preserveTrackerCharacterUiFields(
           presentCharacters,

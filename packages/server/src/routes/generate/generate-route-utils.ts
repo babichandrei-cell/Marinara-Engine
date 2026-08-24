@@ -1453,7 +1453,7 @@ export function collectLatestTrackerCharacterHistory(
   return history;
 }
 
-type TrackerCharacterCardIdentity = {
+export type TrackerCharacterCardIdentity = {
   id: string;
   name: string;
   avatarPath?: string | null;
@@ -1516,6 +1516,103 @@ export function canonicalizeGamePartySpeakerLabels(content: string, canonicalNam
       return canonicalName ? `${indentation}[${canonicalName}]${suffix}` : line;
     },
   );
+}
+
+/**
+ * Load the current Character Library as a minimal identity-only catalog.
+ *
+ * This deliberately does NOT expose Character Card prompt fields such as
+ * description, personality, scenario, backstory, or appearance. The catalog
+ * exists only so tracker output can resolve a known library character to its
+ * stable Character Card id without requiring chat roster membership.
+ */
+export async function loadTrackerCharacterIdentityCatalog(
+  loadCharacters: () => Promise<
+    Array<{
+      id: string;
+      data: string;
+      avatarPath?: string | null;
+    }>
+  >,
+  onError?: (error: unknown) => void,
+): Promise<TrackerCharacterCardIdentity[]> {
+  let rows: Array<{
+    id: string;
+    data: string;
+    avatarPath?: string | null;
+  }>;
+
+  try {
+    rows = await loadCharacters();
+  } catch (error) {
+    onError?.(error);
+    return [];
+  }
+
+  const identities: TrackerCharacterCardIdentity[] = [];
+
+  for (const row of rows) {
+    const id = typeof row.id === "string" ? row.id.trim() : "";
+    if (!id) continue;
+
+    try {
+      const data = JSON.parse(row.data) as unknown;
+      if (!isPlainRecord(data)) continue;
+
+      const name = typeof data.name === "string" ? data.name.trim() : "";
+      if (!name) continue;
+
+      const extensions = isPlainRecord(data.extensions) ? data.extensions : null;
+
+      // Built-in assistants are application infrastructure, not ordinary
+      // library identities available for off-roster roleplay matching.
+      if (extensions?.isBuiltInAssistant === true) continue;
+
+      identities.push({
+        id,
+        name,
+        avatarPath:
+          typeof row.avatarPath === "string" && row.avatarPath.trim()
+            ? row.avatarPath
+            : null,
+        avatarCrop: extensions?.avatarCrop ?? null,
+      });
+    } catch {
+      // Ignore malformed library rows just as other library lookup helpers do.
+    }
+  }
+
+  return identities;
+}
+
+/**
+ * Merge roster identities with the wider Character Library without weakening
+ * existing roster semantics.
+ *
+ * Roster cards win by both id and normalized name. With an empty roster the
+ * full library remains available, including duplicate names; the downstream
+ * canonicalizer already treats duplicate normalized names as ambiguous and
+ * refuses name-based matching for them.
+ */
+export function mergeTrackerCharacterIdentityCatalog(
+  rosterCards: TrackerCharacterCardIdentity[],
+  libraryCards: TrackerCharacterCardIdentity[],
+): TrackerCharacterCardIdentity[] {
+  const rosterIds = new Set(
+    rosterCards.map((card) => card.id.trim().toLowerCase()).filter(Boolean),
+  );
+  const rosterNames = new Set(
+    rosterCards.map((card) => normalizeTextForMatch(card.name)).filter(Boolean),
+  );
+
+  return [
+    ...rosterCards,
+    ...libraryCards.filter((card) => {
+      const id = card.id.trim().toLowerCase();
+      const name = normalizeTextForMatch(card.name);
+      return !rosterIds.has(id) && (!name || !rosterNames.has(name));
+    }),
+  ];
 }
 
 export function applyTrackerCharacterCardIdentity(

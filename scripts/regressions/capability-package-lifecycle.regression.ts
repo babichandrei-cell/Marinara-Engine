@@ -104,7 +104,7 @@ try {
   const legacyManifest = capabilityPackageManifestSchema.parse(installedPackage("legacy", ["agent"]).manifest);
   assert.equal(legacyManifest.schemaVersion, 1, "Existing manifest v1 packages must remain readable");
   assert.equal(getCapabilityApiCompatibilityIssue(legacyManifest), null);
-  assert.deepEqual(supportedCapabilityApi, { major: 1, minor: 13 });
+  assert.deepEqual(supportedCapabilityApi, { major: 1, minor: 14 });
 
   const manifestV2 = capabilityPackageManifestSchema.parse({
     ...legacyManifest,
@@ -140,21 +140,55 @@ try {
   });
   assert.match(
     getCapabilityApiCompatibilityIssue(unsupportedMajorManifest) ?? "",
-    /requires capability API 2\.0; this Engine supports 1\.13/,
+    /requires capability API 2\.0; this Engine supports 1\.14/,
   );
   const currentMinorManifest = capabilityPackageManifestSchema.parse({
     ...manifestV2,
-    capabilityApi: { major: 1, minor: 13 },
+    capabilityApi: { major: 1, minor: 14 },
   });
   assert.equal(getCapabilityApiCompatibilityIssue(currentMinorManifest), null);
   const unsupportedMinorManifest = capabilityPackageManifestSchema.parse({
     ...manifestV2,
-    capabilityApi: { major: 1, minor: 14 },
+    capabilityApi: { major: 1, minor: 15 },
   });
   assert.match(
     getCapabilityApiCompatibilityIssue(unsupportedMinorManifest) ?? "",
-    /requires capability API 1\.14; this Engine supports 1\.13/,
+    /requires capability API 1\.15; this Engine supports 1\.14/,
   );
+
+  const {
+    dispatchCapabilityAgentPipelineSettled,
+    registerCapabilityAgentPipelineSettledHandler,
+    resetCapabilityAgentPipelineSettledHandlers,
+  } = await import(
+    "../../packages/server/src/services/capability-packages/capability-agent-lifecycle.service.js"
+  );
+  resetCapabilityAgentPipelineSettledHandlers();
+  const lifecycleCalls: string[] = [];
+  const cleanupFirst = registerCapabilityAgentPipelineSettledHandler(async (event) => {
+    lifecycleCalls.push(`first:${event.messageId}:${event.swipeIndex}`);
+  });
+  const cleanupBroken = registerCapabilityAgentPipelineSettledHandler(async () => {
+    throw new Error("expected lifecycle regression failure");
+  });
+  const cleanupSecond = registerCapabilityAgentPipelineSettledHandler(async (event) => {
+    lifecycleCalls.push(`second:${event.generationId}`);
+  });
+  await dispatchCapabilityAgentPipelineSettled({
+    chatId: "chat-1",
+    generationId: "generation-1",
+    messageId: "message-1",
+    swipeIndex: 2,
+  });
+  assert.deepEqual(
+    lifecycleCalls,
+    ["first:message-1:2", "second:generation-1"],
+    "all lifecycle subscribers run and one failure does not suppress the others",
+  );
+  cleanupFirst();
+  cleanupBroken();
+  cleanupSecond();
+  resetCapabilityAgentPipelineSettledHandlers();
 
   const forwardCompatibleCatalog = capabilityCatalogSchema.parse({
     schemaVersion: 1,
