@@ -40,6 +40,7 @@ const registryBlockStart = generateRoute.indexOf("// CHARACTER_LORE_REGISTRY_IDS
 const registryBlockEnd = generateRoute.indexOf("// ── Compute chat embedding for semantic lorebook matching", registryBlockStart);
 assert.ok(registryBlockStart >= 0 && registryBlockEnd > registryBlockStart, "registry activation block must precede lore assembly");
 const registryBlock = generateRoute.slice(registryBlockStart, registryBlockEnd);
+// Match executable statements only; explanatory comments may name forbidden downstream structures.
 assert.doesNotMatch(
   registryBlock,
   /(?:^|\n)\s*(?:agentContext\.characters|presentCharacters\s*=|_activeCharacterCardIds)\b/u,
