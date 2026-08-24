@@ -140,6 +140,7 @@ import {
   assemblePrompt,
   appendFallbackChatSummaryToSystemPrompt,
   buildPromptMacroContext,
+  buildReferencedCharacterContext,
   normalizeChatMacroVariables,
   collectCharacterAdvancedPromptEntries,
   resolveCharacterAdvancedPromptIds,
@@ -4905,6 +4906,65 @@ export async function generateRoutes(app: FastifyInstance) {
             logger.warn(`[pre-gen] Non-critical agent(s) failed (${failedNames}) — continuing generation`);
           }
 
+          // CHARACTER_LORE_CARRY_FORWARD_V1
+          // Preserve the tested deterministic half of Character Activation Runtime:
+          // canonical Character Card IDs already present in the anchored Character
+          // Tracker state remain request-scoped active for this generation. This does
+          // NOT mutate Chat Settings -> Characters and does not run another LLM.
+          const trackerCarryForwardCharacterIds: string[] = [];
+          const trackerPresentCharacters = Array.isArray(gameState?.presentCharacters)
+            ? gameState.presentCharacters
+            : [];
+
+          for (const present of trackerPresentCharacters) {
+            const candidateId = typeof present.characterId === "string" ? present.characterId.trim() : "";
+            if (!candidateId || trackerCarryForwardCharacterIds.includes(candidateId)) continue;
+            if (await chars.getById(candidateId)) trackerCarryForwardCharacterIds.push(candidateId);
+          }
+
+          if (trackerCarryForwardCharacterIds.length > 0) {
+            const activeCharacterInfo = await loadCharacterPromptInfo({
+              chars,
+              characterIds: trackerCarryForwardCharacterIds,
+              chatMode,
+            });
+
+            const knownAgentCharacterIds = new Set(agentContext.characters.map((character) => character.id));
+            for (const character of activeCharacterInfo) {
+              if (knownAgentCharacterIds.has(character.id)) continue;
+              agentContext.characters.push(character);
+              knownAgentCharacterIds.add(character.id);
+            }
+
+            const carriedContext = await buildReferencedCharacterContext({
+              db: app.db,
+              activeCharacterIds: promptCharacterIds,
+              sources: trackerCarryForwardCharacterIds.map((characterId) => `{{${characterId}}}`),
+              chatMessages: toLorebookScanMessages(),
+              macroCtx: promptMacroContext,
+              wrapFormat,
+              chatId: input.chatId,
+              gameState: gameState as Record<string, unknown> | null,
+              generationTriggers: lorebookGenerationTriggers,
+              excludedLorebookIds: lorebookScopeExclusions.excludedLorebookIds,
+              excludedLorebookSourceAgentIds: lorebookScopeExclusions.excludedSourceAgentIds,
+            });
+
+            if (carriedContext.content.trim()) {
+              agentContext.memory._activatedCharacterContext = carriedContext.content;
+              finalMessages = injectAtDepth(finalMessages, [
+                { content: carriedContext.content, role: "system", depth: 0 },
+              ]);
+            }
+
+            agentContext.memory._activeCharacterCardIds = trackerCarryForwardCharacterIds;
+            logger.info(
+              "[character-lore-carry-forward] Activated %d canonical Tracker Character Card(s): %s",
+              trackerCarryForwardCharacterIds.length,
+              trackerCarryForwardCharacterIds.join(", "),
+            );
+          }
+
           for (const result of preGenResults) {
             if (!result.success || result.type !== "prompt_patch") continue;
             if (!customAgentCanApplyResult(result, resolvedAgents, builtInAgentTypes, "edit_main_prompt")) continue;
@@ -8529,10 +8589,7 @@ export async function generateRoutes(app: FastifyInstance) {
                   charInfo,
                   libraryCharacterIdentities,
                 );
-                const cardCharacterIds = applyTrackerCharacterCardIdentity(
-                  chars,
-                  trackerIdentityCatalog,
-                );
+                const cardCharacterIds = applyTrackerCharacterCardIdentity(chars, trackerIdentityCatalog);
                 const oldChars = parseJsonField<any[]>(previousCharacterSnapshot?.presentCharacters, []);
                 preserveTrackerCharacterUiFields(chars, oldChars);
                 preserveTrackerCharacterUiFields(chars, characterTrackerHistory);
