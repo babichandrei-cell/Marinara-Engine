@@ -77,9 +77,11 @@ if MARKER not in text:
             "generate referenced-character import",
         )
 
-    # Reuse the normal Character Card prompt loader.
+    # Reuse the normal Character Card prompt loader. Newer Marinara already imports
+    # this symbol in a grouped character-prompt-context import, so only add a standalone
+    # import when the symbol is genuinely absent from the file.
     loader_import = 'import { loadCharacterPromptInfo } from "../services/generation/character-prompt-context.js";\n'
-    if loader_import not in text:
+    if "loadCharacterPromptInfo" not in text:
         import_anchor = 'import { textRewriteDropsProtectedMarkup } from "../services/generation/text-rewrite-safety.js";\n'
         text = replace_once(
             text,
