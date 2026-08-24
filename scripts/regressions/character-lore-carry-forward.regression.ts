@@ -21,6 +21,29 @@ assert.match(
 );
 assert.match(
   generateRoute,
+  /trackerCarryForwardSnapshot = await selectedGameStateSnapshotPromise/u,
+  "early lore activation must use Marinara's selected committed\/visible game-state snapshot promise",
+);
+assert.match(
+  generateRoute,
+  /parseGameStateRow\(trackerCarryForwardSnapshot as Record<string, unknown>\)/u,
+  "the selected snapshot must be parsed through the normal game-state parser before reading Tracker characters",
+);
+assert.doesNotMatch(
+  generateRoute.slice(
+    generateRoute.indexOf("// CHARACTER_LORE_EFFECTIVE_IDS_V1"),
+    generateRoute.indexOf("// ── Compute chat embedding for semantic lorebook matching"),
+  ),
+  /gameState\?\.presentCharacters/u,
+  "early lore activation must not read gameState before its later declaration",
+);
+assert.equal(
+  (generateRoute.match(/const trackerCarryForwardCharacterIds: string\[\] = \[\];/gu) ?? []).length,
+  1,
+  "canonical Tracker carry-forward IDs must be declared exactly once and reused by lore + card context",
+);
+assert.match(
+  generateRoute,
   /new Set\(\[\.\.\.promptCharacterIds, \.\.\.trackerCarryForwardCharacterIds\]\)/u,
   "standard lore character scope must union prompt roster IDs with canonical Tracker carry-forward IDs",
 );
@@ -77,8 +100,8 @@ assert.ok(
 
 assert.match(
   generateRoute,
-  /Array\.isArray\(gameState\?\.presentCharacters\)/u,
-  "carry-forward must be sourced from the anchored prior Character Tracker presentCharacters state",
+  /Array\.isArray\(trackerCarryForwardState\?\.presentCharacters\)/u,
+  "carry-forward must read presentCharacters from the selected anchored prior Tracker state",
 );
 assert.match(
   generateRoute,
@@ -89,6 +112,11 @@ assert.match(
   generateRoute,
   /loadCharacterPromptInfo\(\{/u,
   "carried Character Cards must use the normal Character Card prompt loader",
+);
+assert.match(
+  generateRoute,
+  /activeCharacterIds: effectiveLorebookCharacterIds/u,
+  "referenced Character Card context must share the same effective lore character scope",
 );
 assert.match(
   generateRoute,
