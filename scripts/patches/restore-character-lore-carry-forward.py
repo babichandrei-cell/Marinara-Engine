@@ -7,9 +7,10 @@ part of the previously tested Character Activation Runtime:
 1. Canonical Character Tracker presentCharacters IDs from the anchored prior state
    are resolved against Character storage.
 2. Matching Character Cards are loaded request-scoped without mutating chat.characterIds.
-3. Marinara's existing buildReferencedCharacterContext() attaches the card and its
-   Character-linked Lore to the main prompt.
-4. Character Tracker receives the same canonical card/lore baseline.
+3. Those canonical IDs are also added to the ordinary World Lore character-filter
+   scope, so entries using characterFilterIds activate on the next turn.
+4. Marinara's existing buildReferencedCharacterContext() supplies the canonical card
+   block to the main prompt and Character Tracker.
 5. Illustrator ordering/current-turn Tracker handling is untouched.
 
 The older LLM Character Router and Missing Character Recovery are deliberately NOT
@@ -21,6 +22,7 @@ from pathlib import Path
 
 ROOT = Path.cwd()
 MARKER = "CHARACTER_LORE_CARRY_FORWARD_V1"
+LORE_IDS_MARKER = "CHARACTER_LORE_EFFECTIVE_IDS_V1"
 
 
 def read(rel: str) -> str:
@@ -63,13 +65,36 @@ if "buildReferencedCharacterContext," not in text:
     write(rel, text)
 
 # ---------------------------------------------------------------------------
-# 2. Main generation runtime: deterministic canonical Tracker carry-forward.
-#    This MUST run independently of optional pre-generation/KR/Router agents.
+# 2. Prompt assembler: keep roster/card semantics separate from lore filters.
+#    `characterIds` continues to mean the normal prompt roster. The optional
+#    `lorebookCharacterIds` is used only by lorebook matching.
+# ---------------------------------------------------------------------------
+rel = "packages/server/src/services/prompt/assembler.ts"
+text = read(rel)
+if "lorebookCharacterIds?: string[];" not in text:
+    text = replace_once(
+        text,
+        "  characterIds: string[];\n  /** Full active roster when characterIds is narrowed to one generation target. */\n",
+        "  characterIds: string[];\n  /** Request-scoped character IDs used only for lorebook character filters. */\n  lorebookCharacterIds?: string[];\n  /** Full active roster when characterIds is narrowed to one generation target. */\n",
+        "assembler lorebook character ids field",
+    )
+if "characterIds: input.lorebookCharacterIds ?? input.characterIds," not in text:
+    text = replace_once(
+        text,
+        "    characterIds: input.characterIds,\n    personaId: input.personaId ?? null,\n",
+        "    characterIds: input.lorebookCharacterIds ?? input.characterIds,\n    personaId: input.personaId ?? null,\n",
+        "assembler marker lore character ids",
+    )
+write(rel, text)
+
+# ---------------------------------------------------------------------------
+# 3. Main generation runtime: deterministic canonical Tracker carry-forward.
+#    Resolve IDs before the normal lorebook scan so World Lore entries with
+#    characterFilterIds can activate on the very next turn.
 # ---------------------------------------------------------------------------
 rel = "packages/server/src/routes/generate.routes.ts"
 text = read(rel)
 
-# Import the existing builder through the prompt service.
 if "  buildReferencedCharacterContext,\n" not in text:
     text = replace_once(
         text,
@@ -78,9 +103,6 @@ if "  buildReferencedCharacterContext,\n" not in text:
         "generate referenced-character import",
     )
 
-# Reuse the normal Character Card prompt loader. Newer Marinara already imports
-# this symbol in a grouped character-prompt-context import, so only add a standalone
-# import when the symbol is genuinely absent from the file.
 loader_import = 'import { loadCharacterPromptInfo } from "../services/generation/character-prompt-context.js";\n'
 if "loadCharacterPromptInfo" not in text:
     import_anchor = 'import { textRewriteDropsProtectedMarkup } from "../services/generation/text-rewrite-safety.js";\n'
@@ -91,10 +113,69 @@ if "loadCharacterPromptInfo" not in text:
         "character prompt loader import",
     )
 
-# Older versions of this patch accidentally placed the carry-forward block inside
-# the optional pre-generation/KR/Router gate. That means chats with only post-processing
-# agents (e.g. Character Tracker + Illustrator) never executed it. Remove that legacy
-# placement structurally before inserting the unconditional request-scoped block.
+# Migrate the previous implementation, where ID resolution happened only after
+# prompt assembly. Remove that inline resolver if present; the request-scoped card
+# injection block below will reuse the early IDs instead.
+legacy_inline_identity = '''        const trackerCarryForwardCharacterIds: string[] = [];
+        const trackerPresentCharacters = Array.isArray(gameState?.presentCharacters)
+          ? gameState.presentCharacters
+          : [];
+
+        for (const present of trackerPresentCharacters) {
+          const candidateId = typeof present.characterId === "string" ? present.characterId.trim() : "";
+          if (!candidateId || trackerCarryForwardCharacterIds.includes(candidateId)) continue;
+          if (await chars.getById(candidateId)) trackerCarryForwardCharacterIds.push(candidateId);
+        }
+
+'''
+if legacy_inline_identity in text:
+    text = replace_once(text, legacy_inline_identity, "", "remove late carry-forward identity resolver")
+
+# Resolve canonical carried IDs before semantic lore discovery and prompt assembly.
+early_ids_block = '''        // CHARACTER_LORE_EFFECTIVE_IDS_V1
+        // Lorebook character filters must see canonical Character Card IDs from the
+        // anchored prior Tracker state before the normal World Lore scan runs.
+        const trackerCarryForwardCharacterIds: string[] = [];
+        const trackerPresentCharactersForLore = Array.isArray(gameState?.presentCharacters)
+          ? gameState.presentCharacters
+          : [];
+        for (const present of trackerPresentCharactersForLore) {
+          const candidateId = typeof present.characterId === "string" ? present.characterId.trim() : "";
+          if (!candidateId || trackerCarryForwardCharacterIds.includes(candidateId)) continue;
+          if (await chars.getById(candidateId)) trackerCarryForwardCharacterIds.push(candidateId);
+        }
+        const effectiveLorebookCharacterIds = Array.from(
+          new Set([...promptCharacterIds, ...trackerCarryForwardCharacterIds]),
+        );
+
+'''
+embedding_anchor = "        // ── Compute chat embedding for semantic lorebook matching (if any entries are vectorized) ──\n"
+if LORE_IDS_MARKER not in text:
+    text = replace_once(text, embedding_anchor, early_ids_block + embedding_anchor, "early lore character ids")
+
+# Feed the expanded request-scoped set to scope discovery and the preset lore marker,
+# without changing the roster/card IDs used for speaker and macro semantics.
+text = text.replace(
+    "          const lorebookScopeFilters = {\n            chatId: input.chatId,\n            characterIds: promptCharacterIds,\n",
+    "          const lorebookScopeFilters = {\n            chatId: input.chatId,\n            characterIds: effectiveLorebookCharacterIds,\n",
+    1,
+)
+assembler_anchor = "            characterIds: promptCharacterIds,\n            groupCharacterIds: characterIds,\n"
+if "            lorebookCharacterIds: effectiveLorebookCharacterIds,\n" not in text:
+    text = replace_once(
+        text,
+        assembler_anchor,
+        "            characterIds: promptCharacterIds,\n            lorebookCharacterIds: effectiveLorebookCharacterIds,\n            groupCharacterIds: characterIds,\n",
+        "assembler effective lore character ids",
+    )
+
+# Keep Knowledge Router's entry filters consistent with the ordinary lore scan.
+text = text.replace("        const promptCharacterIdSet = new Set(promptCharacterIds);\n", "        const promptCharacterIdSet = new Set(effectiveLorebookCharacterIds);\n", 1)
+text = text.replace("                      activeCharacterIds: promptCharacterIds,\n", "                      activeCharacterIds: effectiveLorebookCharacterIds,\n", 1)
+text = text.replace("                        activeCharacterIds: promptCharacterIds,\n", "                        activeCharacterIds: effectiveLorebookCharacterIds,\n", 1)
+
+# Older versions accidentally placed the card injection block inside the optional
+# pre-generation/KR/Router gate. Remove that legacy placement structurally first.
 legacy_marker = "          // CHARACTER_LORE_CARRY_FORWARD_V1\n"
 legacy_end_anchor = "          for (const result of preGenResults) {\n"
 if legacy_marker in text:
@@ -106,23 +187,9 @@ if legacy_marker in text:
     text = text[:start] + text[end:]
 
 carry_forward = '''        // CHARACTER_LORE_CARRY_FORWARD_V1
-        // Preserve the tested deterministic half of Character Activation Runtime:
-        // canonical Character Card IDs already present in the anchored Character
-        // Tracker state remain request-scoped active for this generation. This does
-        // NOT mutate Chat Settings -> Characters and does not run another LLM.
-        // IMPORTANT: this is intentionally outside the optional pre-generation/KR/Router
-        // gate so it runs even when the chat only has post-processing agents enabled.
-        const trackerCarryForwardCharacterIds: string[] = [];
-        const trackerPresentCharacters = Array.isArray(gameState?.presentCharacters)
-          ? gameState.presentCharacters
-          : [];
-
-        for (const present of trackerPresentCharacters) {
-          const candidateId = typeof present.characterId === "string" ? present.characterId.trim() : "";
-          if (!candidateId || trackerCarryForwardCharacterIds.includes(candidateId)) continue;
-          if (await chars.getById(candidateId)) trackerCarryForwardCharacterIds.push(candidateId);
-        }
-
+        // Preserve the deterministic Character Card context half of Character
+        // Activation Runtime. Identity resolution already ran before lore assembly.
+        // This remains request-scoped and does not mutate Chat Settings -> Characters.
         if (trackerCarryForwardCharacterIds.length > 0) {
           const activeCharacterInfo = await loadCharacterPromptInfo({
             chars,
@@ -185,7 +252,7 @@ else:
 write(rel, text)
 
 # ---------------------------------------------------------------------------
-# 3. Character Tracker receives the same canonical card + attached lore block.
+# 4. Character Tracker receives the same canonical card context block.
 # ---------------------------------------------------------------------------
 rel = "packages/server/src/services/agents/agent-executor.ts"
 text = read(rel)
@@ -198,7 +265,7 @@ if MARKER not in text:
 
   // CHARACTER_LORE_CARRY_FORWARD_V1
   // Character Tracker must see the same request-scoped canonical Character Card
-  // and attached Character Lore baseline that the main model received.
+  // baseline that the main model received.
   if (agentTypes.includes("character-tracker")) {
     const activatedCharacterContext =
       typeof context.memory._activatedCharacterContext === "string"
