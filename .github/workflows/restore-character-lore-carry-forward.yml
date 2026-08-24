@@ -40,8 +40,18 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Format touched Engine sources
+        run: |
+          pnpm exec prettier --write \
+            packages/server/src/services/prompt/index.ts \
+            packages/server/src/routes/generate.routes.ts \
+            packages/server/src/services/agents/agent-executor.ts
+
       - name: Run targeted regression
         run: node scripts/run-regressions.mjs --filter scripts/regressions/character-lore-carry-forward.regression.ts
+
+      - name: Build shared package
+        run: pnpm build:shared
 
       - name: Build server
         run: pnpm build:server
