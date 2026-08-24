@@ -1,0 +1,61 @@
+name: Restore Character Lore Carry-Forward
+
+on:
+  push:
+    branches:
+      - fix/restore-character-lore-carry-forward
+    paths:
+      - .github/workflows/restore-character-lore-carry-forward.yml
+      - scripts/patches/restore-character-lore-carry-forward.py
+      - scripts/regressions/character-lore-carry-forward.regression.ts
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/restore-character-lore-carry-forward
+          fetch-depth: 0
+
+      - name: Apply deterministic carry-forward patch
+        run: python3 scripts/patches/restore-character-lore-carry-forward.py
+
+      - name: Verify clean patch shape
+        run: git diff --check
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run targeted regression
+        run: node scripts/run-regressions.mjs --filter scripts/regressions/character-lore-carry-forward.regression.ts
+
+      - name: Build server
+        run: pnpm build:server
+
+      - name: Commit restored source changes
+        run: |
+          if git diff --quiet; then
+            echo "No source changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/server/src/services/prompt/index.ts \
+                  packages/server/src/routes/generate.routes.ts \
+                  packages/server/src/services/agents/agent-executor.ts
+          git commit -m "fix: restore deterministic character lore carry-forward"
+          git push origin HEAD:fix/restore-character-lore-carry-forward
