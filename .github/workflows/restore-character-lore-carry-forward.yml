@@ -7,7 +7,9 @@ on:
     paths:
       - .github/workflows/restore-character-lore-carry-forward.yml
       - scripts/patches/restore-character-lore-carry-forward.py
+      - scripts/patches/activate-character-lore-registries.py
       - scripts/regressions/character-lore-carry-forward.regression.ts
+      - scripts/regressions/character-lore-registry-activation.regression.ts
   workflow_dispatch:
 
 permissions:
@@ -25,6 +27,9 @@ jobs:
 
       - name: Apply deterministic carry-forward patch
         run: python3 scripts/patches/restore-character-lore-carry-forward.py
+
+      - name: Apply deterministic lore registry activation
+        run: python3 scripts/patches/activate-character-lore-registries.py
 
       - name: Verify clean patch shape
         run: git diff --check
@@ -44,11 +49,15 @@ jobs:
         run: |
           pnpm exec prettier --write \
             packages/server/src/services/prompt/index.ts \
+            packages/server/src/services/prompt/assembler.ts \
             packages/server/src/routes/generate.routes.ts \
             packages/server/src/services/agents/agent-executor.ts
 
-      - name: Run targeted regression
+      - name: Run carry-forward regression
         run: node scripts/run-regressions.mjs --filter scripts/regressions/character-lore-carry-forward.regression.ts
+
+      - name: Run lore registry activation regression
+        run: node scripts/run-regressions.mjs --filter scripts/regressions/character-lore-registry-activation.regression.ts
 
       - name: Build shared package
         run: pnpm build:shared
@@ -65,7 +74,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add packages/server/src/services/prompt/index.ts \
+                  packages/server/src/services/prompt/assembler.ts \
                   packages/server/src/routes/generate.routes.ts \
                   packages/server/src/services/agents/agent-executor.ts
-          git commit -m "fix: restore deterministic character lore carry-forward"
+          git commit -m "fix: restore deterministic character lore activation"
           git push origin HEAD:fix/restore-character-lore-carry-forward
