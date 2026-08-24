@@ -7,6 +7,7 @@ This file is the release-notes source of truth for Marinara Engine. Reuse these 
 ### Added
 
 - Added capability API 1.14, which lets capability packages react after an Agent pipeline settles and read the anchored Character Tracker state. Character Lore Sync can now maintain Current Outfit entries for character cards and detailed Current State entries for NPCs without another model call.
+- Illustrator now receives the successful Character Tracker result from its own turn before writing an image prompt, so outfits and appearance no longer wait for the next turn. This uses the same Tracker call and does not rescan Lorebooks.
 
 ## [2.4.3]
 

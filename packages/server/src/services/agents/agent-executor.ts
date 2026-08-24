@@ -2629,6 +2629,16 @@ function buildAgentExtras(
     parts.push(`</current_game_state>`);
   }
 
+  const currentTurnCharacterTrackerUpdate = context.memory._currentTurnCharacterTrackerUpdate;
+  if (agentTypes.includes("illustrator") && Array.isArray(currentTurnCharacterTrackerUpdate)) {
+    parts.push(`<current_turn_character_tracker_update>`);
+    parts.push(
+      "This is the Character Tracker result for the assistant response you are illustrating. It is newer than the game-state and Lorebook context above; use its presentCharacters as the authoritative current visual state, especially appearance and outfit.",
+    );
+    parts.push(JSON.stringify({ presentCharacters: currentTurnCharacterTrackerUpdate }));
+    parts.push(`</current_turn_character_tracker_update>`);
+  }
+
   const gameImageStylePrompt =
     context.chatMode === "game" && typeof context.memory._gameImageStylePrompt === "string"
       ? context.memory._gameImageStylePrompt.trim()

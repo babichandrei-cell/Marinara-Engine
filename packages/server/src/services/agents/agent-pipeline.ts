@@ -416,9 +416,11 @@ export async function runPostProcessingAgents(
   agents: ResolvedAgent[],
   context: AgentContext,
   onResult?: AgentResultCallback,
+  agentTypeFilter?: (agentType: string) => boolean,
   resolveAgentContext?: AgentContextResolver,
 ): Promise<AgentResult[]> {
-  return executePhase(agents, "post_processing", context, onResult, resolveAgentContext);
+  const filtered = agentTypeFilter ? agents.filter((agent) => agentTypeFilter(agent.type)) : agents;
+  return executePhase(filtered, "post_processing", context, onResult, resolveAgentContext);
 }
 
 /**
@@ -502,16 +504,27 @@ export function createAgentPipeline(
      */
     async postGenerate(
       mainResponse: string,
-      options: { preGenInjections?: AgentInjection[]; parallelResults?: AgentResult[] } = {},
+      options: {
+        preGenInjections?: AgentInjection[];
+        parallelResults?: AgentResult[];
+        context?: AgentContext;
+        agentTypeFilter?: (agentType: string) => boolean;
+      } = {},
     ): Promise<AgentResult[]> {
       const fullContext: AgentContext = {
-        ...baseContext,
+        ...(options.context ?? baseContext),
         mainResponse,
         preGenInjections: options.preGenInjections ?? preGenerationInjections,
         parallelResults: options.parallelResults ?? parallelPhaseResults,
       };
 
-      return runPostProcessingAgents(agents, fullContext, wrappedOnResult, resolveAgentContext);
+      return runPostProcessingAgents(
+        agents,
+        fullContext,
+        wrappedOnResult,
+        options.agentTypeFilter,
+        resolveAgentContext,
+      );
     },
 
     /** All results collected so far. */

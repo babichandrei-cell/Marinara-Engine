@@ -7913,15 +7913,64 @@ export async function generateRoutes(app: FastifyInstance) {
             return { ...result, data: spriteData };
           };
 
-          let postResults = hasPostProcessingAgents
-            ? [
-                ...(await pipeline.postGenerate(completedResponse, {
-                  preGenInjections: contextInjections,
-                  parallelResults,
-                })),
-                ...parallelResults,
-              ]
-            : [...parallelResults];
+          const postGenerateOptions = {
+            preGenInjections: contextInjections,
+            parallelResults,
+          };
+          const hasCharacterTrackerPostAgent = pipelineAgents.some(
+            (agent) => agent.phase === "post_processing" && agent.type === "character-tracker",
+          );
+          const hasIllustratorPostAgent = pipelineAgents.some(
+            (agent) => agent.phase === "post_processing" && agent.type === "illustrator",
+          );
+          let postResults: AgentResult[];
+          if (hasPostProcessingAgents && hasCharacterTrackerPostAgent && hasIllustratorPostAgent) {
+            // Illustrator needs the Character Tracker's current-turn clothing and appearance,
+            // whereas all other post agents may still run while Tracker is completing. Keep
+            // Tracker to one call, then give only Illustrator its fresh result — not a Lorebook
+            // rescan or a mutable game-state write that could affect unrelated agents.
+            const [characterTrackerResults, otherPostResults] = await Promise.all([
+              pipeline.postGenerate(completedResponse, {
+                ...postGenerateOptions,
+                agentTypeFilter: (agentType) => agentType === "character-tracker",
+              }),
+              pipeline.postGenerate(completedResponse, {
+                ...postGenerateOptions,
+                agentTypeFilter: (agentType) => agentType !== "character-tracker" && agentType !== "illustrator",
+              }),
+            ]);
+            const currentTurnCharacterTrackerUpdate = characterTrackerResults.find((result) => {
+              const data = result.data as Record<string, unknown> | null;
+              return (
+                result.success &&
+                result.type === "character_tracker_update" &&
+                Array.isArray(data?.presentCharacters) &&
+                data.presentCharacters.length > 0
+              );
+            })?.data as Record<string, unknown> | undefined;
+            const illustratorContext: AgentContext = currentTurnCharacterTrackerUpdate
+              ? {
+                  ...postAgentContext,
+                  memory: {
+                    ...postAgentContext.memory,
+                    _currentTurnCharacterTrackerUpdate: currentTurnCharacterTrackerUpdate.presentCharacters,
+                  },
+                }
+              : postAgentContext;
+            const illustratorResults = await pipeline.postGenerate(completedResponse, {
+              ...postGenerateOptions,
+              context: illustratorContext,
+              agentTypeFilter: (agentType) => agentType === "illustrator",
+            });
+            postResults = [...characterTrackerResults, ...otherPostResults, ...illustratorResults, ...parallelResults];
+          } else if (hasPostProcessingAgents) {
+            postResults = [
+              ...(await pipeline.postGenerate(completedResponse, postGenerateOptions)),
+              ...parallelResults,
+            ];
+          } else {
+            postResults = [...parallelResults];
+          }
 
           if (lorebookKeeperAgent) {
             const historicalLorebookTarget = getLorebookKeeperAutomaticTarget(
