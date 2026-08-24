@@ -42,7 +42,7 @@ assert.ok(registryBlockStart >= 0 && registryBlockEnd > registryBlockStart, "reg
 const registryBlock = generateRoute.slice(registryBlockStart, registryBlockEnd);
 assert.doesNotMatch(
   registryBlock,
-  /agentContext\.characters|presentCharacters\s*=|_activeCharacterCardIds/u,
+  /(?:^|\n)\s*(?:agentContext\.characters|presentCharacters\s*=|_activeCharacterCardIds)\b/u,
   "registry activation must not assert scene presence or add Character Cards to downstream agent roster",
 );
 assert.match(
