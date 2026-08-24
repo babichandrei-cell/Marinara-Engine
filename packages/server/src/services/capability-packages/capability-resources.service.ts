@@ -2,6 +2,7 @@ import type {
   CapabilityCharacterRecord,
   CapabilityLorebookCreateInput,
   CapabilityLorebookEntryInput,
+  CapabilityLorebookEntryUpdateInput,
   CapabilityLorebookEntryRecord,
   CapabilityLorebookEntrySelection,
   CapabilityLorebookRecord,
@@ -14,6 +15,7 @@ import type {
 import type { DB } from "../../db/connection.js";
 import { createCharactersStorage } from "../storage/characters.storage.js";
 import { createLorebooksStorage } from "../storage/lorebooks.storage.js";
+import { syncCharacterBookFromLorebook } from "../lorebook/character-book-sync.js";
 
 type LorebookEntrySource = {
   id: string;
@@ -127,12 +129,50 @@ export function createCapabilityResourceHost(db: DB): CapabilityResourceHost {
       await lorebooks.update(lorebookId, updates);
     },
 
+    async createLorebookEntry(
+      lorebookId: string,
+      entry: CapabilityLorebookEntryInput,
+    ): Promise<CapabilityLorebookEntryRecord> {
+      const record = (await lorebooks.createEntry({
+        ...entry,
+        lorebookId,
+      })) as unknown as LorebookEntrySource | null;
+
+      if (!record) {
+        throw new Error("[capability] createLorebookEntry failed");
+      }
+      await syncCharacterBookFromLorebook(db, record.lorebookId);
+      const books = (await lorebooks.list()) as unknown as Array<{ id: string; name: string }>;
+      const lorebookName = books.find((book) => book.id === record.lorebookId)?.name ?? "Unknown lorebook";
+      return {
+        id: record.id,
+        lorebookId: record.lorebookId,
+        lorebookName,
+        name: record.name,
+        content: record.content,
+        description: record.description,
+      };
+    },
+
     async bulkCreateLorebookEntries(lorebookId: string, entries: CapabilityLorebookEntryInput[]): Promise<void> {
       await lorebooks.bulkCreateEntries(lorebookId, entries);
+      await syncCharacterBookFromLorebook(db, lorebookId);
+    },
+
+    async updateLorebookEntry(entryId: string, updates: CapabilityLorebookEntryUpdateInput): Promise<void> {
+      const existing = (await lorebooks.getEntry(entryId)) as unknown as LorebookEntrySource | null;
+      await lorebooks.updateEntry(entryId, updates);
+      if (existing?.lorebookId) {
+        await syncCharacterBookFromLorebook(db, existing.lorebookId);
+      }
     },
 
     async removeLorebookEntry(entryId: string): Promise<void> {
+      const existing = (await lorebooks.getEntry(entryId)) as unknown as LorebookEntrySource | null;
       await lorebooks.removeEntry(entryId);
+      if (existing?.lorebookId) {
+        await syncCharacterBookFromLorebook(db, existing.lorebookId);
+      }
     },
   };
 }

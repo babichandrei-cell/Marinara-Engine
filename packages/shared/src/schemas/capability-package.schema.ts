@@ -181,7 +181,10 @@ const capabilityPackageManifestBaseSchema = z
 //        to fold the Game narration box down to its handle for a cutscene beat. It
 //        never writes the player's stored preference and the engine's safety rules
 //        still force the box open when it holds something to act on.
-export const supportedCapabilityApi = Object.freeze({ major: 1, minor: 13 } as const);
+// 1.14: server runtimes may subscribe to the post-persistence agent pipeline
+//        lifecycle; persistence exposes anchored Character Tracker reads; and
+//        resources expose in-place lorebook entry updates.
+export const supportedCapabilityApi = Object.freeze({ major: 1, minor: 14 } as const);
 
 const capabilityApiVersionSchema = z
   .object({

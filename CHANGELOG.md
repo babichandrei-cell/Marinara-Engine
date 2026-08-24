@@ -4,6 +4,10 @@ This file is the release-notes source of truth for Marinara Engine. Reuse these 
 
 ## [Unreleased]
 
+### Added
+
+- Added capability API 1.14, which lets capability packages react after an Agent pipeline settles and read the anchored Character Tracker state. Character Lore Sync can now maintain Current Outfit entries for character cards and detailed Current State entries for NPCs without another model call.
+
 ## [2.4.3]
 
 ### Added

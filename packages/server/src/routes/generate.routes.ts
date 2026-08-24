@@ -370,6 +370,7 @@ import {
 import { runTurnGameBotTurns } from "../services/turn-games/turn-game-bot-runner.service.js";
 import { getTurnGameContextBuilder } from "../services/turn-games/turn-game-runner.service.js";
 import { getCapabilityService } from "../services/capability-packages/capability-service-registry.service.js";
+import { dispatchCapabilityAgentPipelineSettled } from "../services/capability-packages/capability-agent-lifecycle.service.js";
 import { normalizeContextInjections } from "./generate/agent-normalizers.js";
 import {
   buildGenerationPromptPresetCandidates,
@@ -1474,6 +1475,16 @@ export async function generateRoutes(app: FastifyInstance) {
       const mappedMessages: GenerationPromptMessage[] = [];
       for (const message of chatMessages) {
         mappedMessages.push(await mapChatHistoryMessageForPrompt(message));
+      }
+
+      // Empty Send in Roleplay is a prompt-only user turn. It must reach the
+      // model as a normal user message, but must never be persisted or shown.
+      if (chatMode === "roleplay" && input.roleplayContinue) {
+        mappedMessages.push({
+          role: "user",
+          content: "Continue the story.",
+          contextKind: "injection",
+        });
       }
 
       // Attach current request's provider inputs to the last user message (they're already saved in extra,
@@ -9630,6 +9641,15 @@ export async function generateRoutes(app: FastifyInstance) {
           // ── Text rewrite/editing agents: run after ALL other agents ──
           const originalResponseBeforeRewrite = completedResponse;
           let textRewriteApplied = false;
+          if (messageId) {
+            await dispatchCapabilityAgentPipelineSettled({
+              chatId: input.chatId,
+              generationId,
+              messageId,
+              swipeIndex: targetSwipeIndex,
+            });
+          }
+
           if (activatedTextRewriteRunAgents.length > 0 && messageId && !abortController.signal.aborted) {
             let currentResponseForRewrite = originalResponseBeforeRewrite;
 

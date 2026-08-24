@@ -1198,6 +1198,8 @@ export function useGenerate() {
       narrativeDirectorMode?: "natural" | "random";
       generationGuide?: string;
       generationGuideSource?: "narrator" | "guide" | "game_start";
+      /** Empty Roleplay Send: inject a prompt-only user turn without persisting it. */
+      roleplayContinue?: boolean;
       agentInjectionOverrides?: Array<{ agentType: string; agentName?: string; text: string }>;
       impersonatePresetId?: string;
       impersonateConnectionId?: string;
@@ -3004,6 +3006,38 @@ export function useGenerate() {
           // persisted active-swipe row after generation-time SSE patches.
           await refreshVisibleGameStateAfterGeneration(params.chatId);
         }
+
+        // Capability packages can mutate character-linked Lorebooks after the
+        // agent pipeline settles. The server mirrors embedded Character Books,
+        // but React Query can still hold a five-minute character-detail
+        // snapshot. Reconcile the affected character resources only after the
+        // generation has fully settled so Character Editor immediately sees
+        // tracker-driven Lore changes without a manual embedded-lorebook refresh.
+        if (chatModeForGeneration === "roleplay" || chatModeForGeneration === "game") {
+          const activeChatForResourceRefresh =
+            useChatStore.getState().activeChat?.id === params.chatId ? useChatStore.getState().activeChat : null;
+          const cachedChatForResourceRefresh =
+            qc.getQueryData<Chat[]>(chatKeys.list())?.find((item) => item.id === params.chatId) ?? null;
+          const chatForResourceRefresh = activeChatForResourceRefresh ?? cachedChatForResourceRefresh;
+          const characterIdsForResourceRefresh = parseChatCharacterIds(chatForResourceRefresh?.characterIds);
+
+          for (const characterId of characterIdsForResourceRefresh) {
+            void qc.invalidateQueries({
+              queryKey: characterKeys.detail(characterId),
+              exact: true,
+              refetchType: "active",
+            });
+          }
+          void qc.invalidateQueries({
+            queryKey: characterKeys.list(),
+            refetchType: "active",
+          });
+          void qc.invalidateQueries({
+            queryKey: lorebookKeys.active(params.chatId),
+            refetchType: "active",
+          });
+        }
+
         if (isGameGeneration && sawDoneEvent && receivedContent) {
           const uiState = useUIStore.getState();
           playConfiguredNotificationPing(uiState.gameNotificationSound, uiState.notificationSoundsOnlyWhenUnfocused);
