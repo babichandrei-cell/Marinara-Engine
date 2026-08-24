@@ -64,98 +64,125 @@ if "buildReferencedCharacterContext," not in text:
 
 # ---------------------------------------------------------------------------
 # 2. Main generation runtime: deterministic canonical Tracker carry-forward.
+#    This MUST run independently of optional pre-generation/KR/Router agents.
 # ---------------------------------------------------------------------------
 rel = "packages/server/src/routes/generate.routes.ts"
 text = read(rel)
-if MARKER not in text:
-    # Import the existing builder through the prompt service.
-    if "  buildReferencedCharacterContext,\n" not in text:
-        text = replace_once(
-            text,
-            "  buildPromptMacroContext,\n",
-            "  buildPromptMacroContext,\n  buildReferencedCharacterContext,\n",
-            "generate referenced-character import",
-        )
 
-    # Reuse the normal Character Card prompt loader. Newer Marinara already imports
-    # this symbol in a grouped character-prompt-context import, so only add a standalone
-    # import when the symbol is genuinely absent from the file.
-    loader_import = 'import { loadCharacterPromptInfo } from "../services/generation/character-prompt-context.js";\n'
-    if "loadCharacterPromptInfo" not in text:
-        import_anchor = 'import { textRewriteDropsProtectedMarkup } from "../services/generation/text-rewrite-safety.js";\n'
-        text = replace_once(
-            text,
-            import_anchor,
-            import_anchor + loader_import,
-            "character prompt loader import",
-        )
+# Import the existing builder through the prompt service.
+if "  buildReferencedCharacterContext,\n" not in text:
+    text = replace_once(
+        text,
+        "  buildPromptMacroContext,\n",
+        "  buildPromptMacroContext,\n  buildReferencedCharacterContext,\n",
+        "generate referenced-character import",
+    )
 
-    pregen_anchor = '''          for (const result of preGenResults) {
-            if (!result.success || result.type !== "prompt_patch") continue;
+# Reuse the normal Character Card prompt loader. Newer Marinara already imports
+# this symbol in a grouped character-prompt-context import, so only add a standalone
+# import when the symbol is genuinely absent from the file.
+loader_import = 'import { loadCharacterPromptInfo } from "../services/generation/character-prompt-context.js";\n'
+if "loadCharacterPromptInfo" not in text:
+    import_anchor = 'import { textRewriteDropsProtectedMarkup } from "../services/generation/text-rewrite-safety.js";\n'
+    text = replace_once(
+        text,
+        import_anchor,
+        import_anchor + loader_import,
+        "character prompt loader import",
+    )
+
+# Older versions of this patch accidentally placed the carry-forward block inside
+# the optional pre-generation/KR/Router gate. That means chats with only post-processing
+# agents (e.g. Character Tracker + Illustrator) never executed it. Remove that legacy
+# placement structurally before inserting the unconditional request-scoped block.
+legacy_marker = "          // CHARACTER_LORE_CARRY_FORWARD_V1\n"
+legacy_end_anchor = "          for (const result of preGenResults) {\n"
+if legacy_marker in text:
+    start = text.index(legacy_marker)
+    try:
+        end = text.index(legacy_end_anchor, start)
+    except ValueError as exc:
+        raise SystemExit("legacy carry-forward relocation: end anchor not found") from exc
+    text = text[:start] + text[end:]
+
+carry_forward = '''        // CHARACTER_LORE_CARRY_FORWARD_V1
+        // Preserve the tested deterministic half of Character Activation Runtime:
+        // canonical Character Card IDs already present in the anchored Character
+        // Tracker state remain request-scoped active for this generation. This does
+        // NOT mutate Chat Settings -> Characters and does not run another LLM.
+        // IMPORTANT: this is intentionally outside the optional pre-generation/KR/Router
+        // gate so it runs even when the chat only has post-processing agents enabled.
+        const trackerCarryForwardCharacterIds: string[] = [];
+        const trackerPresentCharacters = Array.isArray(gameState?.presentCharacters)
+          ? gameState.presentCharacters
+          : [];
+
+        for (const present of trackerPresentCharacters) {
+          const candidateId = typeof present.characterId === "string" ? present.characterId.trim() : "";
+          if (!candidateId || trackerCarryForwardCharacterIds.includes(candidateId)) continue;
+          if (await chars.getById(candidateId)) trackerCarryForwardCharacterIds.push(candidateId);
+        }
+
+        if (trackerCarryForwardCharacterIds.length > 0) {
+          const activeCharacterInfo = await loadCharacterPromptInfo({
+            chars,
+            characterIds: trackerCarryForwardCharacterIds,
+            chatMode,
+          });
+
+          const knownAgentCharacterIds = new Set(agentContext.characters.map((character) => character.id));
+          for (const character of activeCharacterInfo) {
+            if (knownAgentCharacterIds.has(character.id)) continue;
+            agentContext.characters.push(character);
+            knownAgentCharacterIds.add(character.id);
+          }
+
+          const carriedContext = await buildReferencedCharacterContext({
+            db: app.db,
+            activeCharacterIds: promptCharacterIds,
+            sources: trackerCarryForwardCharacterIds.map((characterId) => `{{${characterId}}}`),
+            chatMessages: toLorebookScanMessages(),
+            macroCtx: promptMacroContext,
+            wrapFormat,
+            chatId: input.chatId,
+            gameState: gameState as Record<string, unknown> | null,
+            generationTriggers: lorebookGenerationTriggers,
+            excludedLorebookIds: lorebookScopeExclusions.excludedLorebookIds,
+            excludedLorebookSourceAgentIds: lorebookScopeExclusions.excludedSourceAgentIds,
+          });
+
+          if (carriedContext.content.trim()) {
+            agentContext.memory._activatedCharacterContext = carriedContext.content;
+            finalMessages = injectAtDepth(finalMessages, [
+              { content: carriedContext.content, role: "system", depth: 0 },
+            ]);
+          }
+
+          agentContext.memory._activeCharacterCardIds = trackerCarryForwardCharacterIds;
+          logger.info(
+            "[character-lore-carry-forward] Activated %d canonical Tracker Character Card(s): %s",
+            trackerCarryForwardCharacterIds.length,
+            trackerCarryForwardCharacterIds.join(", "),
+          );
+        }
+
 '''
-    carry_forward = '''          // CHARACTER_LORE_CARRY_FORWARD_V1
-          // Preserve the tested deterministic half of Character Activation Runtime:
-          // canonical Character Card IDs already present in the anchored Character
-          // Tracker state remain request-scoped active for this generation. This does
-          // NOT mutate Chat Settings -> Characters and does not run another LLM.
-          const trackerCarryForwardCharacterIds: string[] = [];
-          const trackerPresentCharacters = Array.isArray(gameState?.presentCharacters)
-            ? gameState.presentCharacters
-            : [];
 
-          for (const present of trackerPresentCharacters) {
-            const candidateId =
-              typeof present.characterId === "string" ? present.characterId.trim() : "";
-            if (!candidateId || trackerCarryForwardCharacterIds.includes(candidateId)) continue;
-            if (await chars.getById(candidateId)) trackerCarryForwardCharacterIds.push(candidateId);
-          }
+pregen_gate_anchor = "        if (shouldRunDirectorSecretPlot || shouldRunPreGen || shouldRunKR || shouldRunRouter) {\n"
+if MARKER not in text:
+    text = replace_once(
+        text,
+        pregen_gate_anchor,
+        carry_forward + pregen_gate_anchor,
+        "unconditional carry-forward placement",
+    )
+else:
+    marker_index = text.index(MARKER)
+    gate_index = text.index(pregen_gate_anchor)
+    if marker_index > gate_index:
+        raise SystemExit("carry-forward placement: marker is still nested behind the optional pre-generation gate")
 
-          if (trackerCarryForwardCharacterIds.length > 0) {
-            const activeCharacterInfo = await loadCharacterPromptInfo({
-              chars,
-              characterIds: trackerCarryForwardCharacterIds,
-              chatMode,
-            });
-
-            const knownAgentCharacterIds = new Set(agentContext.characters.map((character) => character.id));
-            for (const character of activeCharacterInfo) {
-              if (knownAgentCharacterIds.has(character.id)) continue;
-              agentContext.characters.push(character);
-              knownAgentCharacterIds.add(character.id);
-            }
-
-            const carriedContext = await buildReferencedCharacterContext({
-              db: app.db,
-              activeCharacterIds: promptCharacterIds,
-              sources: trackerCarryForwardCharacterIds.map((characterId) => `{{${characterId}}}`),
-              chatMessages: toLorebookScanMessages(),
-              macroCtx: promptMacroContext,
-              wrapFormat,
-              chatId: input.chatId,
-              gameState: gameState as Record<string, unknown> | null,
-              generationTriggers: lorebookGenerationTriggers,
-              excludedLorebookIds: lorebookScopeExclusions.excludedLorebookIds,
-              excludedLorebookSourceAgentIds: lorebookScopeExclusions.excludedSourceAgentIds,
-            });
-
-            if (carriedContext.content.trim()) {
-              agentContext.memory._activatedCharacterContext = carriedContext.content;
-              finalMessages = injectAtDepth(finalMessages, [
-                { content: carriedContext.content, role: "system", depth: 0 },
-              ]);
-            }
-
-            agentContext.memory._activeCharacterCardIds = trackerCarryForwardCharacterIds;
-            logger.info(
-              "[character-lore-carry-forward] Activated %d canonical Tracker Character Card(s): %s",
-              trackerCarryForwardCharacterIds.length,
-              trackerCarryForwardCharacterIds.join(", "),
-            );
-          }
-
-''' + pregen_anchor
-    text = replace_once(text, pregen_anchor, carry_forward, "pre-generation carry-forward")
-    write(rel, text)
+write(rel, text)
 
 # ---------------------------------------------------------------------------
 # 3. Character Tracker receives the same canonical card + attached lore block.
