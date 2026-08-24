@@ -2097,6 +2097,26 @@ export async function generateRoutes(app: FastifyInstance) {
           return sourceIds.filter((id) => scopedIds.has(id));
         };
 
+        // CHARACTER_LORE_EFFECTIVE_IDS_V1
+        // Lorebook character filters must see canonical Character Card IDs from the
+        // selected prior Tracker snapshot before the normal World Lore scan runs.
+        const trackerCarryForwardSnapshot = await selectedGameStateSnapshotPromise;
+        const trackerCarryForwardState = trackerCarryForwardSnapshot
+          ? parseGameStateRow(trackerCarryForwardSnapshot as Record<string, unknown>)
+          : null;
+        const trackerCarryForwardCharacterIds: string[] = [];
+        const trackerPresentCharactersForLore = Array.isArray(trackerCarryForwardState?.presentCharacters)
+          ? trackerCarryForwardState.presentCharacters
+          : [];
+        for (const present of trackerPresentCharactersForLore) {
+          const candidateId = typeof present.characterId === "string" ? present.characterId.trim() : "";
+          if (!candidateId || trackerCarryForwardCharacterIds.includes(candidateId)) continue;
+          if (await chars.getById(candidateId)) trackerCarryForwardCharacterIds.push(candidateId);
+        }
+        const effectiveLorebookCharacterIds = Array.from(
+          new Set([...promptCharacterIds, ...trackerCarryForwardCharacterIds]),
+        );
+
         // ── Compute chat embedding for semantic lorebook matching (if any entries are vectorized) ──
         sendProgress("embedding");
         const _tEmbed = Date.now();
@@ -2110,7 +2130,7 @@ export async function generateRoutes(app: FastifyInstance) {
         try {
           const lorebookScopeFilters = {
             chatId: input.chatId,
-            characterIds: promptCharacterIds,
+            characterIds: effectiveLorebookCharacterIds,
             personaId,
             activeLorebookIds: chatActiveLorebookIds,
             excludedLorebookIds: lorebookScopeExclusions.excludedLorebookIds,
@@ -2191,6 +2211,7 @@ export async function generateRoutes(app: FastifyInstance) {
             localVariables: chatMacroVariables,
             chatId: input.chatId,
             characterIds: promptCharacterIds,
+            lorebookCharacterIds: effectiveLorebookCharacterIds,
             groupCharacterIds: characterIds,
             personaId,
             personaName,
@@ -4177,7 +4198,7 @@ export async function generateRoutes(app: FastifyInstance) {
         // for routing. The router picks IDs from this list and the selected entries
         // are injected verbatim — no per-entry summarization pass.
         const knowledgeRouterAgent = resolvedAgents.find((a) => a.type === "knowledge-router");
-        const promptCharacterIdSet = new Set(promptCharacterIds);
+        const promptCharacterIdSet = new Set(effectiveLorebookCharacterIds);
         const knowledgeRouterActiveCharacterTags = Array.from(
           new Set(
             charInfo
@@ -4221,7 +4242,7 @@ export async function generateRoutes(app: FastifyInstance) {
                   if (effectiveEphemeral === 0) return false;
                   if (
                     !lorebookEntryPassesContextFilters(e, {
-                      activeCharacterIds: promptCharacterIds,
+                      activeCharacterIds: effectiveLorebookCharacterIds,
                       activeCharacterTags: knowledgeRouterActiveCharacterTags,
                       generationTriggers: lorebookGenerationTriggers,
                     })
@@ -4706,21 +4727,9 @@ export async function generateRoutes(app: FastifyInstance) {
         };
 
         // CHARACTER_LORE_CARRY_FORWARD_V1
-        // Preserve the tested deterministic half of Character Activation Runtime:
-        // canonical Character Card IDs already present in the anchored Character
-        // Tracker state remain request-scoped active for this generation. This does
-        // NOT mutate Chat Settings -> Characters and does not run another LLM.
-        // IMPORTANT: this is intentionally outside the optional pre-generation/KR/Router
-        // gate so it runs even when the chat only has post-processing agents enabled.
-        const trackerCarryForwardCharacterIds: string[] = [];
-        const trackerPresentCharacters = Array.isArray(gameState?.presentCharacters) ? gameState.presentCharacters : [];
-
-        for (const present of trackerPresentCharacters) {
-          const candidateId = typeof present.characterId === "string" ? present.characterId.trim() : "";
-          if (!candidateId || trackerCarryForwardCharacterIds.includes(candidateId)) continue;
-          if (await chars.getById(candidateId)) trackerCarryForwardCharacterIds.push(candidateId);
-        }
-
+        // Preserve the deterministic Character Card context half of Character
+        // Activation Runtime. Identity resolution already ran before lore assembly.
+        // This remains request-scoped and does not mutate Chat Settings -> Characters.
         if (trackerCarryForwardCharacterIds.length > 0) {
           const activeCharacterInfo = await loadCharacterPromptInfo({
             chars,
@@ -4737,7 +4746,7 @@ export async function generateRoutes(app: FastifyInstance) {
 
           const carriedContext = await buildReferencedCharacterContext({
             db: app.db,
-            activeCharacterIds: promptCharacterIds,
+            activeCharacterIds: effectiveLorebookCharacterIds,
             sources: trackerCarryForwardCharacterIds.map((characterId) => `{{${characterId}}}`),
             chatMessages: toLorebookScanMessages(),
             macroCtx: promptMacroContext,
@@ -4888,7 +4897,7 @@ export async function generateRoutes(app: FastifyInstance) {
                       scanMessages: toLorebookScanMessages(),
                       scanOptions: {
                         gameState: gameState as GameStateForScanning | null,
-                        activeCharacterIds: promptCharacterIds,
+                        activeCharacterIds: effectiveLorebookCharacterIds,
                         activeCharacterTags: knowledgeRouterActiveCharacterTags,
                         generationTriggers: lorebookGenerationTriggers,
                       },
