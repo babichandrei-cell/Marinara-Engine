@@ -55,7 +55,9 @@ jobs:
             packages/server/src/services/prompt/index.ts \
             packages/server/src/services/prompt/assembler.ts \
             packages/server/src/routes/generate.routes.ts \
-            packages/server/src/services/agents/agent-executor.ts
+            packages/server/src/services/agents/agent-executor.ts \
+            packages/server/src/routes/generate/generate-route-utils.ts \
+            packages/server/src/routes/generate/retry-agents-route.ts
 
       - name: Run carry-forward regression
         run: node scripts/run-regressions.mjs --filter scripts/regressions/character-lore-carry-forward.regression.ts
@@ -80,6 +82,8 @@ jobs:
           git add packages/server/src/services/prompt/index.ts \
                   packages/server/src/services/prompt/assembler.ts \
                   packages/server/src/routes/generate.routes.ts \
-                  packages/server/src/services/agents/agent-executor.ts
+                  packages/server/src/services/agents/agent-executor.ts \
+                  packages/server/src/routes/generate/generate-route-utils.ts \
+                  packages/server/src/routes/generate/retry-agents-route.ts
           git commit -m "fix: restore deterministic character lore activation"
           git push origin HEAD:fix/restore-character-lore-carry-forward
