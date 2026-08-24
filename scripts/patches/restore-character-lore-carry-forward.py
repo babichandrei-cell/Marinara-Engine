@@ -43,6 +43,15 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
     return text.replace(old, new, 1)
 
 
+def replace_region(text: str, start_anchor: str, end_anchor: str, replacement: str, label: str) -> str:
+    try:
+        start = text.index(start_anchor)
+        end = text.index(end_anchor, start)
+    except ValueError as exc:
+        raise SystemExit(f"{label}: structural anchor not found") from exc
+    return text[:start] + replacement + text[end:]
+
+
 def require_repo() -> None:
     if not (ROOT / "packages/server/src/routes/generate.routes.ts").exists():
         raise SystemExit("Run this script from the Marinara-Engine repository root.")
@@ -113,31 +122,21 @@ if "loadCharacterPromptInfo" not in text:
         "character prompt loader import",
     )
 
-# Migrate the previous implementation, where ID resolution happened only after
-# prompt assembly. Remove that inline resolver if present; the request-scoped card
-# injection block below will reuse the early IDs instead.
-legacy_inline_identity = '''        const trackerCarryForwardCharacterIds: string[] = [];
-        const trackerPresentCharacters = Array.isArray(gameState?.presentCharacters)
-          ? gameState.presentCharacters
-          : [];
-
-        for (const present of trackerPresentCharacters) {
-          const candidateId = typeof present.characterId === "string" ? present.characterId.trim() : "";
-          if (!candidateId || trackerCarryForwardCharacterIds.includes(candidateId)) continue;
-          if (await chars.getById(candidateId)) trackerCarryForwardCharacterIds.push(candidateId);
-        }
-
-'''
-if legacy_inline_identity in text:
-    text = replace_once(text, legacy_inline_identity, "", "remove late carry-forward identity resolver")
-
 # Resolve canonical carried IDs before semantic lore discovery and prompt assembly.
+# `gameState` itself is intentionally created much later, after agent resolution, so
+# use the already-hoisted selected snapshot promise here instead of reading gameState
+# before its declaration. Awaiting the same promise again later is safe and preserves
+# Marinara's existing committed/visible snapshot selection semantics.
 early_ids_block = '''        // CHARACTER_LORE_EFFECTIVE_IDS_V1
         // Lorebook character filters must see canonical Character Card IDs from the
-        // anchored prior Tracker state before the normal World Lore scan runs.
+        // selected prior Tracker snapshot before the normal World Lore scan runs.
+        const trackerCarryForwardSnapshot = await selectedGameStateSnapshotPromise;
+        const trackerCarryForwardState = trackerCarryForwardSnapshot
+          ? parseGameStateRow(trackerCarryForwardSnapshot as Record<string, unknown>)
+          : null;
         const trackerCarryForwardCharacterIds: string[] = [];
-        const trackerPresentCharactersForLore = Array.isArray(gameState?.presentCharacters)
-          ? gameState.presentCharacters
+        const trackerPresentCharactersForLore = Array.isArray(trackerCarryForwardState?.presentCharacters)
+          ? trackerCarryForwardState.presentCharacters
           : [];
         for (const present of trackerPresentCharactersForLore) {
           const candidateId = typeof present.characterId === "string" ? present.characterId.trim() : "";
@@ -150,7 +149,10 @@ early_ids_block = '''        // CHARACTER_LORE_EFFECTIVE_IDS_V1
 
 '''
 embedding_anchor = "        // ── Compute chat embedding for semantic lorebook matching (if any entries are vectorized) ──\n"
-if LORE_IDS_MARKER not in text:
+early_marker_anchor = "        // CHARACTER_LORE_EFFECTIVE_IDS_V1\n"
+if early_marker_anchor in text:
+    text = replace_region(text, early_marker_anchor, embedding_anchor, early_ids_block, "refresh early lore character ids")
+else:
     text = replace_once(text, embedding_anchor, early_ids_block + embedding_anchor, "early lore character ids")
 
 # Feed the expanded request-scoped set to scope discovery and the preset lore marker,
@@ -170,22 +172,25 @@ if "            lorebookCharacterIds: effectiveLorebookCharacterIds,\n" not in t
     )
 
 # Keep Knowledge Router's entry filters consistent with the ordinary lore scan.
-text = text.replace("        const promptCharacterIdSet = new Set(promptCharacterIds);\n", "        const promptCharacterIdSet = new Set(effectiveLorebookCharacterIds);\n", 1)
-text = text.replace("                      activeCharacterIds: promptCharacterIds,\n", "                      activeCharacterIds: effectiveLorebookCharacterIds,\n", 1)
-text = text.replace("                        activeCharacterIds: promptCharacterIds,\n", "                        activeCharacterIds: effectiveLorebookCharacterIds,\n", 1)
+text = text.replace(
+    "        const promptCharacterIdSet = new Set(promptCharacterIds);\n",
+    "        const promptCharacterIdSet = new Set(effectiveLorebookCharacterIds);\n",
+    1,
+)
+text = text.replace(
+    "                      activeCharacterIds: promptCharacterIds,\n",
+    "                      activeCharacterIds: effectiveLorebookCharacterIds,\n",
+    1,
+)
+text = text.replace(
+    "                        activeCharacterIds: promptCharacterIds,\n",
+    "                        activeCharacterIds: effectiveLorebookCharacterIds,\n",
+    1,
+)
 
-# Older versions accidentally placed the card injection block inside the optional
-# pre-generation/KR/Router gate. Remove that legacy placement structurally first.
-legacy_marker = "          // CHARACTER_LORE_CARRY_FORWARD_V1\n"
-legacy_end_anchor = "          for (const result of preGenResults) {\n"
-if legacy_marker in text:
-    start = text.index(legacy_marker)
-    try:
-        end = text.index(legacy_end_anchor, start)
-    except ValueError as exc:
-        raise SystemExit("legacy carry-forward relocation: end anchor not found") from exc
-    text = text[:start] + text[end:]
-
+# Replace the request-scoped card-context block structurally. Earlier patch versions
+# declared trackerCarryForwardCharacterIds a second time here; refreshing the entire
+# region guarantees there is only one declaration and it is shared with lore matching.
 carry_forward = '''        // CHARACTER_LORE_CARRY_FORWARD_V1
         // Preserve the deterministic Character Card context half of Character
         // Activation Runtime. Identity resolution already ran before lore assembly.
@@ -206,7 +211,7 @@ carry_forward = '''        // CHARACTER_LORE_CARRY_FORWARD_V1
 
           const carriedContext = await buildReferencedCharacterContext({
             db: app.db,
-            activeCharacterIds: promptCharacterIds,
+            activeCharacterIds: effectiveLorebookCharacterIds,
             sources: trackerCarryForwardCharacterIds.map((characterId) => `{{${characterId}}}`),
             chatMessages: toLorebookScanMessages(),
             macroCtx: promptMacroContext,
@@ -234,9 +239,21 @@ carry_forward = '''        // CHARACTER_LORE_CARRY_FORWARD_V1
         }
 
 '''
-
 pregen_gate_anchor = "        if (shouldRunDirectorSecretPlot || shouldRunPreGen || shouldRunKR || shouldRunRouter) {\n"
-if MARKER not in text:
+unconditional_marker = "        // CHARACTER_LORE_CARRY_FORWARD_V1\n"
+legacy_nested_marker = "          // CHARACTER_LORE_CARRY_FORWARD_V1\n"
+
+if unconditional_marker in text:
+    text = replace_region(
+        text,
+        unconditional_marker,
+        pregen_gate_anchor,
+        carry_forward,
+        "refresh unconditional carry-forward block",
+    )
+elif legacy_nested_marker in text:
+    legacy_end_anchor = "          for (const result of preGenResults) {\n"
+    text = replace_region(text, legacy_nested_marker, legacy_end_anchor, "", "remove nested carry-forward block")
     text = replace_once(
         text,
         pregen_gate_anchor,
@@ -244,10 +261,12 @@ if MARKER not in text:
         "unconditional carry-forward placement",
     )
 else:
-    marker_index = text.index(MARKER)
-    gate_index = text.index(pregen_gate_anchor)
-    if marker_index > gate_index:
-        raise SystemExit("carry-forward placement: marker is still nested behind the optional pre-generation gate")
+    text = replace_once(
+        text,
+        pregen_gate_anchor,
+        carry_forward + pregen_gate_anchor,
+        "unconditional carry-forward placement",
+    )
 
 write(rel, text)
 
