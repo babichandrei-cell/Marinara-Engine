@@ -105,11 +105,7 @@ if MARKER not in text:
 
           for (const present of trackerPresentCharacters) {
             const candidateId =
-              present &&
-              typeof present === "object" &&
-              typeof (present as Record<string, unknown>).characterId === "string"
-                ? ((present as Record<string, unknown>).characterId as string).trim()
-                : "";
+              typeof present.characterId === "string" ? present.characterId.trim() : "";
             if (!candidateId || trackerCarryForwardCharacterIds.includes(candidateId)) continue;
             if (await chars.getById(candidateId)) trackerCarryForwardCharacterIds.push(candidateId);
           }
