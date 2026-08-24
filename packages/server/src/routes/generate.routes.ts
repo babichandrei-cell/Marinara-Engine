@@ -2113,9 +2113,59 @@ export async function generateRoutes(app: FastifyInstance) {
           if (!candidateId || trackerCarryForwardCharacterIds.includes(candidateId)) continue;
           if (await chars.getById(candidateId)) trackerCarryForwardCharacterIds.push(candidateId);
         }
+        // CHARACTER_LORE_REGISTRY_IDS_V1
+        // Constant entries in already-relevant Lorebooks may act as deterministic
+        // identity registries. Exact Character Card names mentioned there become
+        // lore-eligible only; they are NOT added to scene presence, chat roster,
+        // agentContext.characters, or Character Tracker state by this mechanism.
+        const registryLoreEntries = await lorebooksStore.listActiveEntries({
+          activeLorebookIds: chatActiveLorebookIds,
+          characterIds: promptCharacterIds,
+          personaId,
+          chatId: input.chatId,
+          excludedLorebookIds: lorebookScopeExclusions.excludedLorebookIds,
+          excludedSourceAgentIds: lorebookScopeExclusions.excludedSourceAgentIds,
+        });
+        const registryLoreText = registryLoreEntries
+          .filter((entry) => {
+            const candidate = entry as Record<string, unknown>;
+            const characterFilterIds = Array.isArray(candidate.characterFilterIds) ? candidate.characterFilterIds : [];
+            return candidate.constant === true && characterFilterIds.length === 0;
+          })
+          .map((entry) => {
+            const candidate = entry as Record<string, unknown>;
+            return [candidate.name, candidate.description, candidate.content]
+              .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+              .join("\n");
+          })
+          .join("\n")
+          .toLocaleLowerCase();
+
+        const registryCharacterIds: string[] = [];
+        if (registryLoreText) {
+          for (const row of await chars.list()) {
+            try {
+              const parsed = JSON.parse(row.data) as { name?: unknown };
+              const name = typeof parsed.name === "string" ? parsed.name.trim() : "";
+              if (!name || registryCharacterIds.includes(row.id)) continue;
+              if (registryLoreText.includes(name.toLocaleLowerCase())) registryCharacterIds.push(row.id);
+            } catch {
+              // Invalid Character Card JSON must not break generation; normal card
+              // loaders will surface card-specific problems when that card is used.
+            }
+          }
+        }
+
         const effectiveLorebookCharacterIds = Array.from(
-          new Set([...promptCharacterIds, ...trackerCarryForwardCharacterIds]),
+          new Set([...promptCharacterIds, ...trackerCarryForwardCharacterIds, ...registryCharacterIds]),
         );
+        if (registryCharacterIds.length > 0) {
+          logger.info(
+            "[character-lore-registry] Lore-only activated %d Character Card(s): %s",
+            registryCharacterIds.length,
+            registryCharacterIds.join(", "),
+          );
+        }
 
         // ── Compute chat embedding for semantic lorebook matching (if any entries are vectorized) ──
         sendProgress("embedding");
