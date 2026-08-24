@@ -2708,10 +2708,7 @@ async function applyRetryResultEffects(args: {
           agentContext.characters,
           libraryCharacterIdentities,
         );
-        applyTrackerCharacterCardIdentity(
-          presentCharacters,
-          trackerIdentityCatalog,
-        );
+        applyTrackerCharacterCardIdentity(presentCharacters, trackerIdentityCatalog);
         preserveTrackerCharacterUiFields(presentCharacters, previousCharacters);
         preserveTrackerCharacterUiFields(
           presentCharacters,

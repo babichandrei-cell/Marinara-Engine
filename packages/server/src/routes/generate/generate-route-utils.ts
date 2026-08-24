@@ -1571,10 +1571,7 @@ export async function loadTrackerCharacterIdentityCatalog(
       identities.push({
         id,
         name,
-        avatarPath:
-          typeof row.avatarPath === "string" && row.avatarPath.trim()
-            ? row.avatarPath
-            : null,
+        avatarPath: typeof row.avatarPath === "string" && row.avatarPath.trim() ? row.avatarPath : null,
         avatarCrop: extensions?.avatarCrop ?? null,
       });
     } catch {
@@ -1598,12 +1595,8 @@ export function mergeTrackerCharacterIdentityCatalog(
   rosterCards: TrackerCharacterCardIdentity[],
   libraryCards: TrackerCharacterCardIdentity[],
 ): TrackerCharacterCardIdentity[] {
-  const rosterIds = new Set(
-    rosterCards.map((card) => card.id.trim().toLowerCase()).filter(Boolean),
-  );
-  const rosterNames = new Set(
-    rosterCards.map((card) => normalizeTextForMatch(card.name)).filter(Boolean),
-  );
+  const rosterIds = new Set(rosterCards.map((card) => card.id.trim().toLowerCase()).filter(Boolean));
+  const rosterNames = new Set(rosterCards.map((card) => normalizeTextForMatch(card.name)).filter(Boolean));
 
   return [
     ...rosterCards,

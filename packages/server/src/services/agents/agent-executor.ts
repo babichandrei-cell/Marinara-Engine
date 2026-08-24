@@ -2575,6 +2575,24 @@ function buildAgentExtras(
 ): string {
   const parts: string[] = [];
 
+  // CHARACTER_LORE_CARRY_FORWARD_V1
+  // Character Tracker must see the same request-scoped canonical Character Card
+  // and attached Character Lore baseline that the main model received.
+  if (agentTypes.includes("character-tracker")) {
+    const activatedCharacterContext =
+      typeof context.memory._activatedCharacterContext === "string"
+        ? context.memory._activatedCharacterContext.trim()
+        : "";
+    if (activatedCharacterContext) {
+      parts.push(`<activated_character_context>`);
+      parts.push(
+        `These are existing canonical Character Cards carried forward from the anchored prior Character Tracker state. Use their exact character_id values and treat their card fields and attached lore as the baseline. Infer only scene-dependent changes.`,
+      );
+      parts.push(activatedCharacterContext);
+      parts.push(`</activated_character_context>`);
+    }
+  }
+
   // Card Evolution Auditor needs the FULL character card (not just description)
   // so it can emit exact-match oldText edits. Gated on agent type because
   // forwarding every field would bloat context for agents that don't need it.
