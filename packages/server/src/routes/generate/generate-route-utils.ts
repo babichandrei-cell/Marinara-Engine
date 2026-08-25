@@ -1456,6 +1456,8 @@ export function collectLatestTrackerCharacterHistory(
 export type TrackerCharacterCardIdentity = {
   id: string;
   name: string;
+  aliases?: string[];
+  tags?: string[];
   avatarPath?: string | null;
   avatarCrop?: unknown;
 };
@@ -1563,6 +1565,7 @@ export async function loadTrackerCharacterIdentityCatalog(
       if (!name) continue;
 
       const extensions = isPlainRecord(data.extensions) ? data.extensions : null;
+      const aliases = normalizeStringArray(data.tags);
 
       // Built-in assistants are application infrastructure, not ordinary
       // library identities available for off-roster roleplay matching.
@@ -1571,6 +1574,7 @@ export async function loadTrackerCharacterIdentityCatalog(
       identities.push({
         id,
         name,
+        aliases,
         avatarPath:
           typeof row.avatarPath === "string" && row.avatarPath.trim()
             ? row.avatarPath
@@ -1629,6 +1633,26 @@ export function applyTrackerCharacterCardIdentity(
     else cardsByName.set(name, card);
   }
   for (const name of duplicateNames) cardsByName.delete(name);
+
+  // Character Card tags are exact-match identity aliases only. Keep aliases
+  // deterministic and ambiguity-safe: if the same normalized tag belongs to
+  // more than one card, it is not eligible for tracker identity resolution.
+  // Roster cards may already carry `tags`; library-only cards expose the same
+  // values through `aliases` so attached and off-roster characters behave alike.
+  const cardsByAlias = new Map<string, TrackerCharacterCardIdentity>();
+  const duplicateAliases = new Set<string>();
+  for (const card of cards) {
+    const aliases = [...(card.aliases ?? []), ...(card.tags ?? [])];
+    for (const rawAlias of aliases) {
+      const alias = normalizeTextForMatch(rawAlias);
+      if (!alias) continue;
+      const existing = cardsByAlias.get(alias);
+      if (existing && existing.id !== card.id) duplicateAliases.add(alias);
+      else if (!existing) cardsByAlias.set(alias, card);
+    }
+  }
+  for (const alias of duplicateAliases) cardsByAlias.delete(alias);
+
   const canonicalCardNamesByKey = new Map([...cardsByName].map(([key, card]) => [key, card.name]));
 
   const matchedIds = new Set<string>();
@@ -1636,9 +1660,13 @@ export function applyTrackerCharacterCardIdentity(
   const canonicalIndexByCardId = new Map<string, number>();
   for (const character of characters) {
     const explicitCanonicalName = resolveExplicitCanonicalName(character.name, canonicalCardNamesByKey);
+    const aliasCard =
+      cardsByAlias.get(normalizeTextForMatch(character.characterId)) ??
+      cardsByAlias.get(trackerCharacterNameKey(character));
     const card =
       cardsById.get(trackerCharacterIdKey(character)) ??
       cardsByName.get(trackerCharacterNameKey(character)) ??
+      aliasCard ??
       (explicitCanonicalName ? cardsByName.get(normalizeTextForMatch(explicitCanonicalName)) : undefined);
     if (!card) {
       canonicalCharacters.push(character);
