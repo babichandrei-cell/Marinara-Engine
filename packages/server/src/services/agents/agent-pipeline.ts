@@ -63,6 +63,7 @@ interface AgentGroup {
 
 export const AGENT_PHASE_MAX_CONCURRENT_GROUPS = 8;
 const AGENT_GROUP_MAX_CONCURRENT_TOOL_CALLS = 4;
+const ILLUSTRATOR_CURRENT_TURN_AGENT_TYPES = new Set(["world-state", "custom-tracker", "character-tracker"]);
 
 export function normalizeAgentMaxParallelJobs(value: unknown): number {
   const numeric = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
@@ -234,7 +235,7 @@ async function executeGroup(
       )
         .then((agentContext) =>
           runWithConnectionLimit(() =>
-            executeAgent(agent, agentContext, agent.provider, agent.model, agent.toolContext),
+            executeAgent(agent, agentContext, group.provider, group.model, agent.toolContext),
           ),
         )
         .then((result) => {
@@ -446,6 +447,43 @@ export interface AgentPipelineResult {
   allResults: AgentResult[];
 }
 
+function collectIllustratorCurrentTurnAgentResults(results: AgentResult[]): Record<string, unknown> | null {
+  const currentTurnResults: Record<string, unknown> = {};
+  for (const result of results) {
+    if (!result.success || result.data == null || !ILLUSTRATOR_CURRENT_TURN_AGENT_TYPES.has(result.agentType)) continue;
+    currentTurnResults[result.agentType] = result.data;
+  }
+  if (Object.keys(currentTurnResults).length === 0) return null;
+
+  return {
+    instruction:
+      "These tracker results were produced for the assistant response being illustrated. They are newer than saved agent outputs and persisted game-state context; use them as the authoritative current-turn world, scene, character, appearance, and outfit state wherever they apply.",
+    results: currentTurnResults,
+  };
+}
+
+function withIllustratorCurrentTurnAgentResults(context: AgentContext, results: AgentResult[]): AgentContext {
+  const overlay = collectIllustratorCurrentTurnAgentResults(results);
+  if (!overlay) return context;
+
+  const existingAgentResults = context.memory._agentResults;
+  const existingRecord =
+    existingAgentResults && typeof existingAgentResults === "object" && !Array.isArray(existingAgentResults)
+      ? (existingAgentResults as Record<string, unknown>)
+      : {};
+
+  return {
+    ...context,
+    memory: {
+      ...context.memory,
+      _agentResults: {
+        ...existingRecord,
+        currentTurnTrackerUpdates: overlay,
+      },
+    },
+  };
+}
+
 /**
  * Run ALL enabled agents across the full pipeline.
  * Call `preGenerate` before generating, fire `runParallel` concurrently
@@ -511,13 +549,60 @@ export function createAgentPipeline(
         agentTypeFilter?: (agentType: string) => boolean;
       } = {},
     ): Promise<AgentResult[]> {
-      const fullContext: AgentContext = {
+      const basePostContext: AgentContext = {
         ...(options.context ?? baseContext),
         mainResponse,
         preGenInjections: options.preGenInjections ?? preGenerationInjections,
         parallelResults: options.parallelResults ?? parallelPhaseResults,
       };
+      const allowsAgentType = (agentType: string) => options.agentTypeFilter?.(agentType) ?? true;
+      const targetedPostTypes = new Set(
+        agents
+          .filter((agent) => agent.phase === "post_processing" && allowsAgentType(agent.type))
+          .map((agent) => agent.type),
+      );
+      const targetsIllustrator = targetedPostTypes.has("illustrator");
+      const targetsCurrentTurnAgents = Array.from(ILLUSTRATOR_CURRENT_TURN_AGENT_TYPES).some((type) =>
+        targetedPostTypes.has(type),
+      );
 
+      // When a caller asks one post-processing pass to include both Illustrator and
+      // any state-producing tracker, stage those trackers first. This keeps the
+      // dependency correct even when generate.routes does not perform its own split.
+      if (targetsIllustrator && targetsCurrentTurnAgents) {
+        const [trackerResults, otherResults] = await Promise.all([
+          runPostProcessingAgents(
+            agents,
+            basePostContext,
+            wrappedOnResult,
+            (agentType) => allowsAgentType(agentType) && ILLUSTRATOR_CURRENT_TURN_AGENT_TYPES.has(agentType),
+            resolveAgentContext,
+          ),
+          runPostProcessingAgents(
+            agents,
+            basePostContext,
+            wrappedOnResult,
+            (agentType) =>
+              allowsAgentType(agentType) &&
+              agentType !== "illustrator" &&
+              !ILLUSTRATOR_CURRENT_TURN_AGENT_TYPES.has(agentType),
+            resolveAgentContext,
+          ),
+        ]);
+        const illustratorContext = withIllustratorCurrentTurnAgentResults(basePostContext, allResults);
+        const illustratorResults = await runPostProcessingAgents(
+          agents,
+          illustratorContext,
+          wrappedOnResult,
+          (agentType) => allowsAgentType(agentType) && agentType === "illustrator",
+          resolveAgentContext,
+        );
+        return [...trackerResults, ...otherResults, ...illustratorResults];
+      }
+
+      const fullContext = targetsIllustrator
+        ? withIllustratorCurrentTurnAgentResults(basePostContext, allResults)
+        : basePostContext;
       return runPostProcessingAgents(
         agents,
         fullContext,
