@@ -1,0 +1,366 @@
+diff --git a/packages/server/src/routes/generate.routes.ts b/packages/server/src/routes/generate.routes.ts
+index 4c185ef14..ee03bce02 100644
+--- a/packages/server/src/routes/generate.routes.ts
++++ b/packages/server/src/routes/generate.routes.ts
+@@ -370,6 +370,7 @@ import {
+ import { runTurnGameBotTurns } from "../services/turn-games/turn-game-bot-runner.service.js";
+ import { getTurnGameContextBuilder } from "../services/turn-games/turn-game-runner.service.js";
+ import { getCapabilityService } from "../services/capability-packages/capability-service-registry.service.js";
++import { dispatchCapabilityAgentPipelineSettled } from "../services/capability-packages/capability-agent-lifecycle.service.js";
+ import { normalizeContextInjections } from "./generate/agent-normalizers.js";
+ import {
+   buildGenerationPromptPresetCandidates,
+@@ -9640,6 +9641,15 @@ export async function generateRoutes(app: FastifyInstance) {
+           // ── Text rewrite/editing agents: run after ALL other agents ──
+           const originalResponseBeforeRewrite = completedResponse;
+           let textRewriteApplied = false;
++          if (messageId) {
++            await dispatchCapabilityAgentPipelineSettled({
++              chatId: input.chatId,
++              generationId,
++              messageId,
++              swipeIndex: targetSwipeIndex,
++            });
++          }
++
+           if (activatedTextRewriteRunAgents.length > 0 && messageId && !abortController.signal.aborted) {
+             let currentResponseForRewrite = originalResponseBeforeRewrite;
+ 
+diff --git a/packages/server/src/services/capability-packages/capability-module-runtime.service.ts b/packages/server/src/services/capability-packages/capability-module-runtime.service.ts
+index 8466087cf..268f529e6 100644
+--- a/packages/server/src/services/capability-packages/capability-module-runtime.service.ts
++++ b/packages/server/src/services/capability-packages/capability-module-runtime.service.ts
+@@ -8,6 +8,7 @@ import type { FastifyInstance } from "fastify";
+ import {
+   registerTurnGameEngine,
+   type AnyTurnGameEngine,
++  type CapabilityAgentPipelineSettledHandler,
+   type CapabilityRuntimeHost,
+   type CapabilityRuntimeLogArgument,
+   type InstalledCapabilityPackage,
+@@ -24,6 +25,7 @@ import {
+   type CapabilityConversationCommandRegistration,
+ } from "./capability-command-registry.service.js";
+ import { registerCapabilityService } from "./capability-service-registry.service.js";
++import { registerCapabilityAgentPipelineSettledHandler } from "./capability-agent-lifecycle.service.js";
+ import { createCapabilityLanguageModelHost } from "./capability-language-model.service.js";
+ import {
+   createCapabilityEmbeddingHost,
+@@ -47,6 +49,7 @@ type CapabilityActivationContext = {
+     registerTurnGameEngine(engine: AnyTurnGameEngine): Cleanup;
+     registerConversationCommand(registration: CapabilityConversationCommandRegistration): Cleanup;
+     registerService<T>(key: string, service: T): Cleanup;
++    registerAgentPipelineSettledHandler(handler: CapabilityAgentPipelineSettledHandler): Cleanup;
+     /** Contribute text to each turn's system prompt. Requires the `prompt-context` permission. */
+     registerPromptContext(contributor: CapabilityPromptContextContributor): Cleanup;
+     registerPrivilegedRoutes(
+@@ -213,6 +216,14 @@ class CapabilityModuleRuntime {
+             return trackCleanup(registerCapabilityConversationCommand(registration));
+           },
+           registerService: (key, service) => trackCleanup(registerCapabilityService(key, service)),
++          registerAgentPipelineSettledHandler: (handler) => {
++            if (!installed.manifest.permissions?.includes("agent-runtime")) {
++              throw new Error(
++                `Capability package ${installed.id} must declare the "agent-runtime" permission to observe agent lifecycle`,
++              );
++            }
++            return trackCleanup(registerCapabilityAgentPipelineSettledHandler(handler));
++          },
+           // Gated on the permission the manifest already declares, so a package can't reach the prompt
+           // without asking for it up front. Contract in capability-prompt-context.service.ts.
+           registerPromptContext: (contributor) => {
+diff --git a/packages/server/src/services/capability-packages/capability-persistence.service.ts b/packages/server/src/services/capability-packages/capability-persistence.service.ts
+index bd02d464e..1071053f1 100644
+--- a/packages/server/src/services/capability-packages/capability-persistence.service.ts
++++ b/packages/server/src/services/capability-packages/capability-persistence.service.ts
+@@ -4,6 +4,7 @@ import {
+   type CapabilityChatRecord,
+   type CapabilityCreateMessageWithSwipeInput,
+   type CapabilityGameStateRecord,
++  type CapabilityTrackedCharacterRecord,
+   type CapabilityRoleplayEventInput,
+   type CapabilityRoleplayEventRecord,
+   type CapabilityDocumentRecord,
+@@ -133,6 +134,41 @@ function parsePresentCharacterIds(value: unknown): string[] {
+   }
+ }
+ 
++function parseTrackedCharacters(value: unknown): CapabilityTrackedCharacterRecord[] {
++  if (typeof value !== "string") return [];
++  try {
++    const parsed = JSON.parse(value) as unknown;
++    if (!Array.isArray(parsed)) return [];
++    return parsed.flatMap((entry) => {
++      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
++      const record = entry as Record<string, unknown>;
++      const characterId =
++        typeof record.characterId === "string"
++          ? record.characterId.trim()
++          : typeof record.id === "string"
++            ? record.id.trim()
++            : "";
++      const name = typeof record.name === "string" ? record.name.trim() : "";
++      if (!characterId || !name) return [];
++
++      return [{
++        characterId,
++        name,
++        ...(typeof record.emoji === "string" ? { emoji: record.emoji } : {}),
++        ...(typeof record.mood === "string" ? { mood: record.mood } : {}),
++        ...(typeof record.appearance === "string" ? { appearance: record.appearance } : {}),
++        ...(typeof record.outfit === "string" ? { outfit: record.outfit } : {}),
++        ...(typeof record.thoughts === "string" ? { thoughts: record.thoughts } : {}),
++        ...(Array.isArray(record.stats) ? { stats: record.stats } : {}),
++        ...(typeof record.avatarPath === "string" ? { avatarPath: record.avatarPath } : {}),
++        ...(record.avatarCrop !== undefined ? { avatarCrop: record.avatarCrop } : {}),
++      }];
++    });
++  } catch {
++    return [];
++  }
++}
++
+ function mapGameState(row: typeof gameStateSnapshots.$inferSelect): CapabilityGameStateRecord {
+   return {
+     snapshotId: row.id,
+@@ -404,6 +440,20 @@ function createPersistenceSession(db: DB): CapabilityPersistenceSession {
+         .limit(1);
+       return rows[0] ? mapGameState(rows[0]) : null;
+     },
++    async getCharacterTrackerState(chatId, messageId, swipeIndex) {
++      const rows = await db
++        .select({ presentCharacters: gameStateSnapshots.presentCharacters })
++        .from(gameStateSnapshots)
++        .where(
++          and(
++            eq(gameStateSnapshots.chatId, chatId),
++            eq(gameStateSnapshots.messageId, messageId),
++            eq(gameStateSnapshots.swipeIndex, swipeIndex),
++          ),
++        )
++        .limit(1);
++      return rows[0] ? parseTrackedCharacters(rows[0].presentCharacters) : [];
++    },
+     async appendRoleplayEvent(input: CapabilityRoleplayEventInput): Promise<CapabilityRoleplayEventRecord | null> {
+       const scopedOwner = engineEventOwner(input.chatId);
+       const text = input.text.trim().slice(0, MAX_ROLEPLAY_EVENT_TEXT_CHARS);
+diff --git a/packages/server/src/services/capability-packages/capability-resources.service.ts b/packages/server/src/services/capability-packages/capability-resources.service.ts
+index e71ac5c45..74940c43b 100644
+--- a/packages/server/src/services/capability-packages/capability-resources.service.ts
++++ b/packages/server/src/services/capability-packages/capability-resources.service.ts
+@@ -2,6 +2,7 @@ import type {
+   CapabilityCharacterRecord,
+   CapabilityLorebookCreateInput,
+   CapabilityLorebookEntryInput,
++  CapabilityLorebookEntryUpdateInput,
+   CapabilityLorebookEntryRecord,
+   CapabilityLorebookEntrySelection,
+   CapabilityLorebookRecord,
+@@ -127,10 +128,38 @@ export function createCapabilityResourceHost(db: DB): CapabilityResourceHost {
+       await lorebooks.update(lorebookId, updates);
+     },
+ 
++    async createLorebookEntry(
++      lorebookId: string,
++      entry: CapabilityLorebookEntryInput,
++    ): Promise<CapabilityLorebookEntryRecord> {
++      const record = (await lorebooks.createEntry({
++        ...entry,
++        lorebookId,
++      })) as unknown as LorebookEntrySource | null;
++
++      if (!record) {
++        throw new Error("[capability] createLorebookEntry failed");
++      }
++      const books = (await lorebooks.list()) as unknown as Array<{ id: string; name: string }>;
++      const lorebookName = books.find((book) => book.id === record.lorebookId)?.name ?? "Unknown lorebook";
++      return {
++        id: record.id,
++        lorebookId: record.lorebookId,
++        lorebookName,
++        name: record.name,
++        content: record.content,
++        description: record.description,
++      };
++    },
++
+     async bulkCreateLorebookEntries(lorebookId: string, entries: CapabilityLorebookEntryInput[]): Promise<void> {
+       await lorebooks.bulkCreateEntries(lorebookId, entries);
+     },
+ 
++    async updateLorebookEntry(entryId: string, updates: CapabilityLorebookEntryUpdateInput): Promise<void> {
++      await lorebooks.updateEntry(entryId, updates);
++    },
++
+     async removeLorebookEntry(entryId: string): Promise<void> {
+       await lorebooks.removeEntry(entryId);
+     },
+diff --git a/packages/shared/src/schemas/capability-package.schema.ts b/packages/shared/src/schemas/capability-package.schema.ts
+index 247ce64ca..1bfd7a8b5 100644
+--- a/packages/shared/src/schemas/capability-package.schema.ts
++++ b/packages/shared/src/schemas/capability-package.schema.ts
+@@ -181,7 +181,10 @@ const capabilityPackageManifestBaseSchema = z
+ //        to fold the Game narration box down to its handle for a cutscene beat. It
+ //        never writes the player's stored preference and the engine's safety rules
+ //        still force the box open when it holds something to act on.
+-export const supportedCapabilityApi = Object.freeze({ major: 1, minor: 13 } as const);
++// 1.14: server runtimes may subscribe to the post-persistence agent pipeline
++//        lifecycle; persistence exposes anchored Character Tracker reads; and
++//        resources expose in-place lorebook entry updates.
++export const supportedCapabilityApi = Object.freeze({ major: 1, minor: 14 } as const);
+ 
+ const capabilityApiVersionSchema = z
+   .object({
+diff --git a/packages/shared/src/types/capability-runtime.ts b/packages/shared/src/types/capability-runtime.ts
+index b2fabbbc1..34bf10c1f 100644
+--- a/packages/shared/src/types/capability-runtime.ts
++++ b/packages/shared/src/types/capability-runtime.ts
+@@ -108,6 +108,29 @@ export interface CapabilityLorebookEntryInput {
+   [key: string]: unknown;
+ }
+ 
++/** Narrow update surface for an existing lorebook entry. */
++export interface CapabilityLorebookEntryUpdateInput {
++  name?: string;
++  content?: string;
++  description?: string;
++  keys?: string[];
++  secondaryKeys?: string[];
++}
++
++/** One authoritative Character Tracker entry persisted for a message/swipe anchor. */
++export interface CapabilityTrackedCharacterRecord {
++  characterId: string;
++  name: string;
++  emoji?: string;
++  mood?: string;
++  appearance?: string;
++  outfit?: string;
++  thoughts?: string;
++  stats?: unknown[];
++  avatarPath?: string;
++  avatarCrop?: unknown;
++}
++
+ export interface CapabilityResourceHost {
+   listCharacters(characterIds?: string[]): Promise<CapabilityCharacterRecord[]>;
+   listPersonas(personaIds?: string[]): Promise<CapabilityPersonaRecord[]>;
+@@ -121,7 +144,12 @@ export interface CapabilityResourceHost {
+   updatePersona?(personaId: string, updates: CapabilityPersonaUpdateInput): Promise<void>;
+   createLorebook?(input: CapabilityLorebookCreateInput): Promise<CapabilityLorebookRecord>;
+   updateLorebook?(lorebookId: string, updates: CapabilityLorebookUpdateInput): Promise<void>;
++  createLorebookEntry?(
++    lorebookId: string,
++    entry: CapabilityLorebookEntryInput,
++  ): Promise<CapabilityLorebookEntryRecord>;
+   bulkCreateLorebookEntries?(lorebookId: string, entries: CapabilityLorebookEntryInput[]): Promise<void>;
++  updateLorebookEntry?(entryId: string, updates: CapabilityLorebookEntryUpdateInput): Promise<void>;
+   removeLorebookEntry?(entryId: string): Promise<void>;
+ }
+ 
+@@ -337,6 +365,15 @@ export interface CapabilityPersistenceSession {
+   listMessages(chatId: string): Promise<CapabilityMessageRecord[]>;
+   /** Read-only. Optional so packages feature-detect and degrade on older Engines. */
+   getGameState?(chatId: string): Promise<CapabilityGameStateRecord | null>;
++  /**
++   * Read authoritative Character Tracker state for one persisted message/swipe
++   * anchor so overlapping Roleplay generations cannot observe a newer turn.
++   */
++  getCharacterTrackerState?(
++    chatId: string,
++    messageId: string,
++    swipeIndex: number,
++  ): Promise<CapabilityTrackedCharacterRecord[]>;
+   appendRoleplayEvent?(input: CapabilityRoleplayEventInput): Promise<CapabilityRoleplayEventRecord | null>;
+   listExistingLorebookEntryIds(entryIds: string[]): Promise<string[]>;
+   createMessageWithSwipe(input: CapabilityCreateMessageWithSwipeInput): Promise<CapabilityMessageRecord>;
+@@ -368,3 +405,15 @@ export interface CapabilityRuntimeHost {
+   persistence: CapabilityPersistenceHost;
+   resources: CapabilityResourceHost;
+ }
++
++/** Fired after ordinary post-processing results for an anchor are finalized and durably applied. */
++export interface CapabilityAgentPipelineSettledEvent {
++  chatId: string;
++  generationId: string;
++  messageId: string;
++  swipeIndex: number;
++}
++
++export type CapabilityAgentPipelineSettledHandler = (
++  event: CapabilityAgentPipelineSettledEvent,
++) => void | Promise<void>;
+diff --git a/scripts/regressions/capability-package-lifecycle.regression.ts b/scripts/regressions/capability-package-lifecycle.regression.ts
+index 323f2d5cf..aaa319398 100644
+--- a/scripts/regressions/capability-package-lifecycle.regression.ts
++++ b/scripts/regressions/capability-package-lifecycle.regression.ts
+@@ -104,7 +104,7 @@ try {
+   const legacyManifest = capabilityPackageManifestSchema.parse(installedPackage("legacy", ["agent"]).manifest);
+   assert.equal(legacyManifest.schemaVersion, 1, "Existing manifest v1 packages must remain readable");
+   assert.equal(getCapabilityApiCompatibilityIssue(legacyManifest), null);
+-  assert.deepEqual(supportedCapabilityApi, { major: 1, minor: 13 });
++  assert.deepEqual(supportedCapabilityApi, { major: 1, minor: 14 });
+ 
+   const manifestV2 = capabilityPackageManifestSchema.parse({
+     ...legacyManifest,
+@@ -140,22 +140,56 @@ try {
+   });
+   assert.match(
+     getCapabilityApiCompatibilityIssue(unsupportedMajorManifest) ?? "",
+-    /requires capability API 2\.0; this Engine supports 1\.13/,
++    /requires capability API 2\.0; this Engine supports 1\.14/,
+   );
+   const currentMinorManifest = capabilityPackageManifestSchema.parse({
+     ...manifestV2,
+-    capabilityApi: { major: 1, minor: 13 },
++    capabilityApi: { major: 1, minor: 14 },
+   });
+   assert.equal(getCapabilityApiCompatibilityIssue(currentMinorManifest), null);
+   const unsupportedMinorManifest = capabilityPackageManifestSchema.parse({
+     ...manifestV2,
+-    capabilityApi: { major: 1, minor: 14 },
++    capabilityApi: { major: 1, minor: 15 },
+   });
+   assert.match(
+     getCapabilityApiCompatibilityIssue(unsupportedMinorManifest) ?? "",
+-    /requires capability API 1\.14; this Engine supports 1\.13/,
++    /requires capability API 1\.15; this Engine supports 1\.14/,
+   );
+ 
++  const {
++    dispatchCapabilityAgentPipelineSettled,
++    registerCapabilityAgentPipelineSettledHandler,
++    resetCapabilityAgentPipelineSettledHandlers,
++  } = await import(
++    "../../packages/server/src/services/capability-packages/capability-agent-lifecycle.service.js"
++  );
++  resetCapabilityAgentPipelineSettledHandlers();
++  const lifecycleCalls: string[] = [];
++  const cleanupFirst = registerCapabilityAgentPipelineSettledHandler(async (event) => {
++    lifecycleCalls.push(`first:${event.messageId}:${event.swipeIndex}`);
++  });
++  const cleanupBroken = registerCapabilityAgentPipelineSettledHandler(async () => {
++    throw new Error("expected lifecycle regression failure");
++  });
++  const cleanupSecond = registerCapabilityAgentPipelineSettledHandler(async (event) => {
++    lifecycleCalls.push(`second:${event.generationId}`);
++  });
++  await dispatchCapabilityAgentPipelineSettled({
++    chatId: "chat-1",
++    generationId: "generation-1",
++    messageId: "message-1",
++    swipeIndex: 2,
++  });
++  assert.deepEqual(
++    lifecycleCalls,
++    ["first:message-1:2", "second:generation-1"],
++    "all lifecycle subscribers run and one failure does not suppress the others",
++  );
++  cleanupFirst();
++  cleanupBroken();
++  cleanupSecond();
++  resetCapabilityAgentPipelineSettledHandlers();
++
+   const forwardCompatibleCatalog = capabilityCatalogSchema.parse({
+     schemaVersion: 1,
+     generatedAt: "2026-07-16T00:00:00.000Z",

@@ -1,0 +1,87 @@
+{
+  "kind": "marinara.connections",
+  "version": 1,
+  "exportedAt": "2026-08-27T14:28:54.087Z",
+  "notice": "API keys are intentionally not included.",
+  "connections": [
+    {
+      "name": "Deckards Brain 31B",
+      "provider": "custom",
+      "baseUrl": "http://host.docker.internal:8081/v1",
+      "model": "Gemma-4-The-Deckards-Brain-31B-NVFP4",
+      "maxContext": 131072,
+      "maxTokensOverride": 8192,
+      "maxParallelJobs": 1,
+      "maxRequestsPerMinute": null,
+      "promptPresetId": "nyZxBt2oMDUjh17hbk5Pd",
+      "defaultParameters": {
+        "temperature": 1,
+        "maxTokens": 8192,
+        "topP": 0.95,
+        "topK": 64,
+        "frequencyPenalty": 0,
+        "presencePenalty": 0,
+        "reasoningEffort": "low",
+        "verbosity": "medium",
+        "serviceTier": null,
+        "assistantPrefill": "",
+        "assistantReasoningPrefill": "",
+        "customThinkingTags": [
+          {
+            "open": "<|channel>thought\\n",
+            "close": "<channel|>"
+          }
+        ],
+        "customParameters": {
+          "min_p": 0.05,
+          "repeat_last_n": 1024,
+          "reasoning_format": "deepseek",
+          "repeat_penalty": 1.1,
+          "dry_multiplier": 0.8,
+          "dry_base": 1.75,
+          "dry_allowed_length": 2,
+          "dry_penalty_last_n": 512
+        },
+        "managedCustomParameters": {},
+        "enabledParameters": {
+          "temperature": true,
+          "maxTokens": true,
+          "topP": true,
+          "topK": true,
+          "frequencyPenalty": false,
+          "presencePenalty": false,
+          "reasoningEffort": false,
+          "verbosity": false
+        },
+        "imageCaptioningEnabled": false,
+        "imageCaptioningConnectionId": null
+      },
+      "enableCaching": false,
+      "anthropicExtendedCacheTtl": false,
+      "cachingAtDepth": 5,
+      "isDefault": true,
+      "fallbackForMain": false,
+      "useForRandom": false,
+      "defaultForAgents": false,
+      "fallbackForAgents": false,
+      "embeddingModel": "BGE-M3-Q8",
+      "embeddingBaseUrl": "http://host.docker.internal:8081/v1",
+      "embeddingConnectionId": null,
+      "openrouterProvider": null,
+      "imageGenerationSource": null,
+      "imageService": null,
+      "videoGenerationSource": null,
+      "videoService": null,
+      "audioSource": null,
+      "audioVoice": null,
+      "audioSoundEffects": false,
+      "audioMusic": false,
+      "imageEndpointId": null,
+      "imagePromptInstructions": null,
+      "imageGenerationQuality": "auto",
+      "comfyuiWorkflow": null,
+      "treatAsLocalEndpoint": true,
+      "claudeFastMode": false
+    }
+  ]
+}

@@ -1,0 +1,131 @@
+Track NPCs and party members currently present in the scene after the latest assistant message.
+
+Do NOT include the player {{user}}.
+
+Respond ONLY with valid JSON matching this schema:
+
+{
+  "presentCharacters": [
+    {
+      "characterId": "string — existing ID or name",
+      "name": "string",
+      "emoji": "string — one emoji",
+      "mood": "string — one word",
+      "appearance": "string|null — persistent physical traits only",
+      "outfit": "string|null — concise complete summary of current visible clothing",
+      "wardrobe": {
+        "style": "string|null — concise established clothing identity",
+        "upperBody": {
+          "item": "string|null",
+          "description": "string|null",
+          "state": "worn|open|unfastened|removed|damaged|none"
+        },
+        "lowerBody": {
+          "item": "string|null",
+          "description": "string|null",
+          "state": "worn|open|unfastened|removed|damaged|none"
+        },
+        "outerwear": {
+          "item": "string|null",
+          "description": "string|null",
+          "state": "worn|open|unfastened|removed|damaged|none"
+        },
+        "legwear": {
+          "item": "string|null",
+          "description": "string|null",
+          "state": "worn|removed|damaged|none"
+        },
+        "footwear": {
+          "item": "string|null",
+          "description": "string|null",
+          "state": "worn|removed|damaged|none"
+        },
+        "underwearUpper": {
+          "item": "string|null",
+          "description": "string|null",
+          "state": "worn|removed|none"
+        },
+        "underwearLower": {
+          "item": "string|null",
+          "description": "string|null",
+          "state": "worn|removed|none"
+        },
+        "accessories": [
+          {
+            "item": "string",
+            "description": "string|null",
+            "state": "worn|held|removed|damaged"
+          }
+        ],
+        "carriedItems": [
+          {
+            "item": "string",
+            "description": "string|null",
+            "state": "held|carried|set_down"
+          }
+        ],
+        "exposedAreas": ["string"]
+      },
+      "thoughts": "string|null — one brief unspoken thought",
+      "customFields": { "existing field name": "string value" },
+      "stats": [
+        {
+          "name": "string",
+          "value": 0,
+          "max": 0,
+          "color": "#000000"
+        }
+      ]
+    }
+  ]
+}
+
+## Presence
+
+1. Track only characters established as currently present in the narrative.
+2. Keep a character until the narrative clearly states that they leave, are dismissed, or the scene moves away from them.
+3. Character cards and lore provide details; they never prove that a character is present.
+
+## Wardrobe: source priority
+
+Use the first applicable source. Lower sources may fill missing details, but must never contradict a higher source.
+
+1. An explicit in-world clothing change in the narrative.
+2. Active constant lore that explicitly defines clothing for this character, a character group, or a setting-wide NPC category.
+3. Active named character-card or non-constant lore for this exact character.
+4. Prior tracker state, if it does not conflict with sources 1–3.
+5. General setting clothing conventions.
+
+Constant lore is canonical. If constant lore says that a category wears a specific outfit, every character in that category, including named NPCs, wears that outfit unless the narrative explicitly establishes a later clothing change.
+
+On first tracking a character, initialize all wardrobe data from the highest applicable source. Copy explicit garment details faithfully.
+
+If an existing tracker outfit conflicts with applicable constant lore and no explicit later narrative change explains the conflict, replace the tracker outfit with the constant-lore outfit.
+
+Narrative silence is NOT a clothing change.
+
+Never infer a persistent outfit, personal style, colour, material, modesty, formality, or garment from age, gender, mood, class, profession, marital status, respectability, location, weather, posture, or stereotypes.
+
+For example, “a distressed middle-class woman in Charter Ward” is not evidence that she wears a modest wool dress. Do not invent such an outfit.
+
+A wardrobe rule for one named character applies only to that exact character. Never transfer another character’s wardrobe to an NPC.
+
+## Continuity
+
+1. Preserve established appearance, wardrobe, thoughts, customFields, and stats unless higher-priority evidence or the narrative changes them.
+2. Preserve a prior outfit only when it is already supported by valid evidence. Do not preserve an earlier guess over constant lore.
+3. `wardrobe` is the source of truth. `outfit` must accurately summarize the same visible clothing.
+4. Keep all garment slots, accessories, carried items, and exposed areas consistent with `outfit`.
+5. Use concrete supported details: garment type, colour, material, cut, length, and current state.
+6. Do not add decorative fashion details that are not supported by the narrative, character data, or lore.
+7. For a one-piece dress, store it in `upperBody` and set `lowerBody` to `"none"`.
+8. Every fixed wardrobe slot must be an object. If its state is `"none"`, both `item` and `description` must be `null`.
+9. List exposed areas only when visible exposure is explicitly supported.
+10. Use `null` rather than inventing unsupported persistent appearance, clothing, thoughts, or stats.
+
+## Other state
+
+1. Preserve every existing `customFields` key exactly. Do not add, remove, rename, or reorder fields.
+2. Preserve existing stats unless the narrative changes them.
+3. Reuse the known `characterId`. Do not create duplicates because a name is spelled differently.
+4. Return the complete final `presentCharacters` snapshot after every turn.

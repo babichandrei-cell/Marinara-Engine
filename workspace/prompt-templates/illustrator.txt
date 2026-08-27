@@ -1,0 +1,87 @@
+Track the final current visual state of the scene after the latest assistant message.
+
+Current fields live in <current_game_state> under playerStats.customTrackerFields as { name, value, locked? }.
+
+Respond ONLY with valid JSON.
+
+Expected fields may include:
+* Scene Style
+* Setting
+* Environment
+* Spatial Layout
+* Lighting
+* Atmosphere
+* Visible Objects
+
+General rules:
+
+1. Output ALL existing fields. Do not add, rename, reorder, or remove fields. Copy locked fields exactly.
+2. Values are always strings.
+3. Represent the latest chronologically established visual state.
+4. Preserve previous values and wording unless the latest narrative changes them.
+5. When the scene moves elsewhere, replace scene-specific state from the previous setting.
+6. Use active lore as context for established world and setting properties, but not as evidence that a specific movable object, temporary arrangement, or spatial relationship is currently present.
+7. Prefer current narrative and prior tracker state for what is actually present now.
+8. Track only visually representable information. Do not include sounds, smells, thoughts, emotions, or other non-visual information.
+9. Prefer an empty string over unsupported inference.
+
+Field rules:
+
+Scene Style
+- Store a concise visual grammar of the established scene or world aesthetic.
+- Prefer concrete cues such as period/culture, architecture, materials, furnishing language, technology, construction, and fashion context over unexplained genre, world, faction, or setting labels.
+- A proper noun or style label may remain, but must not carry visual meaning by itself.
+- Do not invent stereotypical motifs to explain a style.
+- Preserve the style until the established visual language materially changes.
+
+Setting
+- Store the specific immediate place where the scene occurs.
+- Preserve it until the scene moves elsewhere.
+
+Environment
+- Store persistent visible features that define the place: architecture, major furniture, dominant materials, machinery, built-in systems, and important background features.
+- Include only features whose visible presence is established.
+- Do not convert abstract style information into specific objects, mechanisms, or decorations.
+- Do not inventory ordinary clutter.
+
+Spatial Layout
+- Store only established positional relationships between stable scene features, such as "desk beneath the windows" or "door opposite the fireplace".
+- Do not use camera-relative positions or temporary character positions.
+- Merely being "in the room", "inside", or "nearby" is not a spatial relationship.
+- If no meaningful relationship is established, use an empty string.
+
+Lighting
+- Store the established current illumination.
+- Preserve it until it changes.
+- Do not invent stylistically appropriate lighting. If none is established, use an empty string.
+
+Atmosphere
+- Store only visible ambient conditions such as mist, smoke, haze, steam, dust, rain, snow, heat shimmer, or clear air.
+- Do not store emotional mood or other non-visual atmosphere.
+- If none is established, use an empty string.
+
+Visible Objects
+- Store only significant movable or stateful objects whose presence, placement, or condition matters for continuity.
+- Format:
+  Object — state/location; Object — state/location
+- Prefer locations relative to stable scene anchors when established.
+- Do not repeat ordinary background features already covered by Environment.
+- Do not include an object currently represented as carried by a present character in Character Tracker.
+- When an object moves between the environment and a character, update its authoritative location rather than duplicating it.
+
+Keep the fields distinct:
+Environment = what defines the place.
+Spatial Layout = where stable features are relative to one another.
+Visible Objects = significant movable/stateful objects in the environment.
+
+Schema:
+
+{
+  "fields": [
+    {
+      "name": "string — exact existing field name",
+      "value": "string — current value"
+    }
+  ],
+  "reasoning": "string — brief explanation of what changed and why"
+}
