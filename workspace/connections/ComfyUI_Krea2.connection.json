@@ -1,0 +1,65 @@
+{
+  "kind": "marinara.connections",
+  "version": 1,
+  "exportedAt": "2026-08-27T14:29:08.216Z",
+  "notice": "API keys are intentionally not included.",
+  "connections": [
+    {
+      "name": "ComfyUI Krea2",
+      "provider": "image_generation",
+      "baseUrl": "http://172.17.0.1:8188",
+      "model": "KREA2/krea2_turbo_int8_convrot.safetensors",
+      "maxContext": 128000,
+      "maxTokensOverride": null,
+      "maxParallelJobs": 1,
+      "maxRequestsPerMinute": null,
+      "promptPresetId": null,
+      "defaultParameters": {
+        "imageGeneration": {
+          "version": 1,
+          "service": "comfyui",
+          "seed": -1,
+          "styleProfileId": "off",
+          "comfyui": {
+            "promptPrefix": "",
+            "negativePromptPrefix": "",
+            "sampler": "euler",
+            "scheduler": "normal",
+            "steps": 12,
+            "cfgScale": 1,
+            "denoisingStrength": 1,
+            "clipSkip": null,
+            "uploadPlaceholderOnMissingReference": false,
+            "loras": []
+          }
+        }
+      },
+      "enableCaching": false,
+      "anthropicExtendedCacheTtl": false,
+      "cachingAtDepth": 5,
+      "isDefault": false,
+      "fallbackForMain": false,
+      "useForRandom": false,
+      "defaultForAgents": true,
+      "fallbackForAgents": false,
+      "embeddingModel": "",
+      "embeddingBaseUrl": "",
+      "embeddingConnectionId": null,
+      "openrouterProvider": null,
+      "imageGenerationSource": "comfyui",
+      "imageService": "comfyui",
+      "videoGenerationSource": null,
+      "videoService": null,
+      "audioSource": null,
+      "audioVoice": null,
+      "audioSoundEffects": false,
+      "audioMusic": false,
+      "imageEndpointId": null,
+      "imagePromptInstructions": null,
+      "imageGenerationQuality": "auto",
+      "comfyuiWorkflow": "{\n  \"51\": {\n    \"inputs\": {\n      \"text\": [\n        \"637\",\n        0\n      ],\n      \"clip\": [\n        \"56\",\n        0\n      ]\n    },\n    \"class_type\": \"CLIPTextEncode\",\n    \"_meta\": {\n      \"title\": \"CLIP Text Encode (Prompt)\"\n    }\n  },\n  \"54\": {\n    \"inputs\": {\n      \"samples\": [\n        \"605\",\n        0\n      ],\n      \"vae\": [\n        \"57\",\n        0\n      ]\n    },\n    \"class_type\": \"VAEDecode\",\n    \"_meta\": {\n      \"title\": \"VAE Decode\"\n    }\n  },\n  \"56\": {\n    \"inputs\": {\n      \"clip_name\": \"KREA2/qwen3vl_4b_bf16.safetensors\",\n      \"type\": \"krea2\",\n      \"device\": \"default\"\n    },\n    \"class_type\": \"CLIPLoader\",\n    \"_meta\": {\n      \"title\": \"Load CLIP\"\n    }\n  },\n  \"57\": {\n    \"inputs\": {\n      \"vae_name\": \"WAN22/wan_2.1_vae.safetensors\"\n    },\n    \"class_type\": \"VAELoader\",\n    \"_meta\": {\n      \"title\": \"Load VAE\"\n    }\n  },\n  \"498\": {\n    \"inputs\": {\n      \"text\": \"\",\n      \"clip\": [\n        \"56\",\n        0\n      ]\n    },\n    \"class_type\": \"CLIPTextEncode\",\n    \"_meta\": {\n      \"title\": \"CLIP Text Encode (Prompt)\"\n    }\n  },\n  \"530\": {\n    \"inputs\": {\n      \"unet_name\": \"KREA2/krea2_turbo_int8_convrot.safetensors\",\n      \"weight_dtype\": \"default\"\n    },\n    \"class_type\": \"UNETLoader\",\n    \"_meta\": {\n      \"title\": \"Load Diffusion Model\"\n    }\n  },\n  \"592\": {\n    \"inputs\": {\n      \"PowerLoraLoaderHeaderWidget\": {\n        \"type\": \"PowerLoraLoaderHeaderWidget\"\n      },\n      \"lora_1\": {\n        \"on\": true,\n        \"lora\": \"KREA2/KNP_000003000.safetensors\",\n        \"strength\": 1\n      },\n      \"➕ Add Lora\": \"\",\n      \"model\": [\n        \"530\",\n        0\n      ]\n    },\n    \"class_type\": \"Power Lora Loader (rgthree)\",\n    \"_meta\": {\n      \"title\": \"Power Lora Loader (rgthree)\"\n    }\n  },\n  \"605\": {\n    \"inputs\": {\n      \"seed\": \"%seed%\",\n      \"steps\": \"%steps%\",\n      \"cfg\": \"%cfg%\",\n      \"sampler_name\": \"%sampler%\",\n      \"scheduler\": \"%scheduler%\",\n      \"denoise\": \"%denoise%\",\n      \"model\": [\n        \"592\",\n        0\n      ],\n      \"positive\": [\n        \"51\",\n        0\n      ],\n      \"negative\": [\n        \"498\",\n        0\n      ],\n      \"latent_image\": [\n        \"643\",\n        0\n      ]\n    },\n    \"class_type\": \"KSampler\",\n    \"_meta\": {\n      \"title\": \"KSampler\"\n    }\n  },\n  \"637\": {\n    \"inputs\": {\n      \"value\": \"%prompt%\"\n    },\n    \"class_type\": \"PrimitiveStringMultiline\",\n    \"_meta\": {\n      \"title\": \"Text (Multiline)\"\n    }\n  },\n  \"638\": {\n    \"inputs\": {\n      \"filename_prefix\": \"llama_krea2\",\n      \"images\": [\n        \"54\",\n        0\n      ]\n    },\n    \"class_type\": \"SaveImage\",\n    \"_meta\": {\n      \"title\": \"Save Image\"\n    }\n  },\n  \"643\": {\n    \"inputs\": {\n      \"width\": \"%width%\",\n      \"height\": \"%height%\",\n      \"batch_size\": 1\n    },\n    \"class_type\": \"EmptyLatentImage\",\n    \"_meta\": {\n      \"title\": \"Empty Latent Image\"\n    }\n  }\n}",
+      "treatAsLocalEndpoint": false,
+      "claudeFastMode": false
+    }
+  ]
+}

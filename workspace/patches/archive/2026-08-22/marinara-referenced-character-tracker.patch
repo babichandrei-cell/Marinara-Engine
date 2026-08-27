@@ -1,0 +1,61 @@
+diff --git a/packages/server/src/services/prompt/index.ts b/packages/server/src/services/prompt/index.ts
+index eccc830..PATCHED 100644
+--- a/packages/server/src/services/prompt/index.ts
++++ b/packages/server/src/services/prompt/index.ts
+@@ -13,6 +13,7 @@ export {
+   buildPromptMacroContext,
+   cloneMacroContextForPreview,
++  extractCharacterReferenceIds,
+   resolveMacrosForPreview,
+   normalizeChatMacroVariables,
+   collectCharacterAdvancedPromptEntries,
+diff --git a/packages/server/src/routes/generate/retry-agents-route.ts b/packages/server/src/routes/generate/retry-agents-route.ts
+index CURRENT..PATCHED 100644
+--- a/packages/server/src/routes/generate/retry-agents-route.ts
++++ b/packages/server/src/routes/generate/retry-agents-route.ts
+@@ -1,6 +1,7 @@
+ import {
+   buildPromptMacroContext,
++  extractCharacterReferenceIds,
+   normalizeChatMacroVariables,
+   resolveCharacterMacroData,
+   resolvePromptIdleDuration,
+@@ -XXXX,7 +XXXX,43 @@
+-        applyTrackerCharacterCardIdentity(presentCharacters, agentContext.characters);
++        // Characters referenced by activated lorebook entries (for example
++        // {{hOOM5_L931hp6VwPgzmzS}}) are not members of the chat roster and
++        // therefore are absent from agentContext.characters. They still need
++        // to participate in tracker identity canonicalization.
++        const referencedCharacterIds = extractCharacterReferenceIds(
++          (agentContext.activatedLorebookEntries ?? []).map((entry) => entry.content),
++        );
++
++        const referencedCharacterCards: AgentContext["characters"] = [];
++        const activeCharacterIds = new Set(agentContext.characters.map((character) => character.id));
++
++        for (const characterId of referencedCharacterIds) {
++          if (activeCharacterIds.has(characterId)) continue;
++
++          const charRow = await chars.getById(characterId);
++          if (!charRow) continue;
++
++          const charData = parseJsonIfString<Record<string, unknown>>(charRow.data as string);
++          const extensions =
++            charData.extensions && typeof charData.extensions === "object" && !Array.isArray(charData.extensions)
++              ? (charData.extensions as Record<string, unknown>)
++              : {};
++
++          referencedCharacterCards.push({
++            id: characterId,
++            name: typeof charData.name === "string" ? charData.name : characterId,
++            description: typeof charData.description === "string" ? charData.description : "",
++            avatarPath: typeof charRow.avatarPath === "string" ? charRow.avatarPath : null,
++            avatarCrop: extensions.avatarCrop ?? null,
++          });
++        }
++
++        applyTrackerCharacterCardIdentity(presentCharacters, [
++          ...agentContext.characters,
++          ...referencedCharacterCards,
++        ]);
+         preserveTrackerCharacterUiFields(presentCharacters, previousCharacters);

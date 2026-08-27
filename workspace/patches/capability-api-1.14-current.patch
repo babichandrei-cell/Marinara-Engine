@@ -1,0 +1,1733 @@
+diff --git a/docker-compose.yml b/docker-compose.yml
+index 2f54c7644..b7408a4b2 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -1,13 +1,16 @@
+-# ──────────────────────────────────────────────
+ # Marinara Engine — Docker Compose
+ # ──────────────────────────────────────────────
+ services:
+   marinara:
+-    # Use the pre-built image from GHCR
+-    image: ghcr.io/pasta-devs/marinara-engine:latest
++    build:
++      context: .
++      dockerfile: Dockerfile
++    image: marinara-engine-local
+     init: true
++    extra_hosts:
++      - "host.docker.internal:host-gateway"
+     ports:
+-      - "127.0.0.1:${PORT:-7860}:7860"
++      - "0.0.0.0:${PORT:-7860}:7860"
+     volumes:
+       - marinara-data:/app/data
+     environment:
+@@ -19,6 +22,10 @@ services:
+       - TRUSTED_HOSTS=${TRUSTED_HOSTS:-}
+       - CORS_ORIGINS=${CORS_ORIGINS:-}
+       - CSRF_TRUSTED_ORIGINS=${CSRF_TRUSTED_ORIGINS:-}
++      - PROVIDER_LOCAL_URLS_ENABLED=true
++      - ENABLE_EXTERNAL_EXTENSIONS=${ENABLE_EXTERNAL_EXTENSIONS:-false}
++      - ADMIN_SECRET=${ADMIN_SECRET:-}
++      - IP_ALLOWLIST=${IP_ALLOWLIST:-}
+       # Set BASIC_AUTH_USER/BASIC_AUTH_PASS and ADMIN_SECRET before exposing beyond localhost.
+       # - TZ=America/New_York          # IANA timezone for time-based features (e.g. character schedules)
+       # - ENCRYPTION_KEY=              # AES key for API key encryption (generate: openssl rand -hex 32)
+diff --git a/packages/client/src/components/chat/ChatInput.tsx b/packages/client/src/components/chat/ChatInput.tsx
+index 883e84393..5d746e6c1 100644
+--- a/packages/client/src/components/chat/ChatInput.tsx
++++ b/packages/client/src/components/chat/ChatInput.tsx
+@@ -898,6 +898,7 @@ export const ChatInput = memo(function ChatInput({
+           await generateWithNarrativeDirector({
+             chatId: activeChatId,
+             connectionId: null,
++            ...(mode === "roleplay" && lastMsg.role === "assistant" ? { roleplayContinue: true } : {}),
+           });
+         } catch (error) {
+           const msg = error instanceof Error ? error.message : "Generation failed";
+diff --git a/packages/client/src/hooks/use-generate.ts b/packages/client/src/hooks/use-generate.ts
+index e6861ab45..27e291317 100644
+--- a/packages/client/src/hooks/use-generate.ts
++++ b/packages/client/src/hooks/use-generate.ts
+@@ -1198,6 +1198,8 @@ export function useGenerate() {
+       narrativeDirectorMode?: "natural" | "random";
+       generationGuide?: string;
+       generationGuideSource?: "narrator" | "guide" | "game_start";
++      /** Empty Roleplay Send: inject a prompt-only user turn without persisting it. */
++      roleplayContinue?: boolean;
+       agentInjectionOverrides?: Array<{ agentType: string; agentName?: string; text: string }>;
+       impersonatePresetId?: string;
+       impersonateConnectionId?: string;
+@@ -3004,6 +3006,40 @@ export function useGenerate() {
+           // persisted active-swipe row after generation-time SSE patches.
+           await refreshVisibleGameStateAfterGeneration(params.chatId);
+         }
++
++        // Capability packages can mutate character-linked Lorebooks after the
++        // agent pipeline settles. The server mirrors embedded Character Books,
++        // but React Query can still hold a five-minute character-detail
++        // snapshot. Reconcile the affected character resources only after the
++        // generation has fully settled so Character Editor immediately sees
++        // tracker-driven Lore changes without a manual embedded-lorebook refresh.
++        if (chatModeForGeneration === "roleplay" || chatModeForGeneration === "game") {
++          const activeChatForResourceRefresh =
++            useChatStore.getState().activeChat?.id === params.chatId
++              ? useChatStore.getState().activeChat
++              : null;
++          const cachedChatForResourceRefresh =
++            qc.getQueryData<Chat[]>(chatKeys.list())?.find((item) => item.id === params.chatId) ?? null;
++          const chatForResourceRefresh = activeChatForResourceRefresh ?? cachedChatForResourceRefresh;
++          const characterIdsForResourceRefresh = parseChatCharacterIds(chatForResourceRefresh?.characterIds);
++
++          for (const characterId of characterIdsForResourceRefresh) {
++            void qc.invalidateQueries({
++              queryKey: characterKeys.detail(characterId),
++              exact: true,
++              refetchType: "active",
++            });
++          }
++          void qc.invalidateQueries({
++            queryKey: characterKeys.list(),
++            refetchType: "active",
++          });
++          void qc.invalidateQueries({
++            queryKey: lorebookKeys.active(params.chatId),
++            refetchType: "active",
++          });
++        }
++
+         if (isGameGeneration && sawDoneEvent && receivedContent) {
+           const uiState = useUIStore.getState();
+           playConfiguredNotificationPing(uiState.gameNotificationSound, uiState.notificationSoundsOnlyWhenUnfocused);
+diff --git a/packages/server/src/routes/generate.routes.ts b/packages/server/src/routes/generate.routes.ts
+index b8e9a2b1c..ee03bce02 100644
+--- a/packages/server/src/routes/generate.routes.ts
++++ b/packages/server/src/routes/generate.routes.ts
+@@ -370,6 +370,7 @@ import {
+ import { runTurnGameBotTurns } from "../services/turn-games/turn-game-bot-runner.service.js";
+ import { getTurnGameContextBuilder } from "../services/turn-games/turn-game-runner.service.js";
+ import { getCapabilityService } from "../services/capability-packages/capability-service-registry.service.js";
++import { dispatchCapabilityAgentPipelineSettled } from "../services/capability-packages/capability-agent-lifecycle.service.js";
+ import { normalizeContextInjections } from "./generate/agent-normalizers.js";
+ import {
+   buildGenerationPromptPresetCandidates,
+@@ -1476,6 +1477,16 @@ export async function generateRoutes(app: FastifyInstance) {
+         mappedMessages.push(await mapChatHistoryMessageForPrompt(message));
+       }
+ 
++      // Empty Send in Roleplay is a prompt-only user turn. It must reach the
++      // model as a normal user message, but must never be persisted or shown.
++      if (chatMode === "roleplay" && input.roleplayContinue) {
++        mappedMessages.push({
++          role: "user",
++          content: "Continue the story.",
++          contextKind: "injection",
++        });
++      }
++
+       // Attach current request's provider inputs to the last user message (they're already saved in extra,
+       // but the message was just created and may be the last in mappedMessages)
+       if (!imageCaptioningRuntime.enabled && input.attachments?.length && !input.impersonate) {
+@@ -9630,6 +9641,15 @@ export async function generateRoutes(app: FastifyInstance) {
+           // ── Text rewrite/editing agents: run after ALL other agents ──
+           const originalResponseBeforeRewrite = completedResponse;
+           let textRewriteApplied = false;
++          if (messageId) {
++            await dispatchCapabilityAgentPipelineSettled({
++              chatId: input.chatId,
++              generationId,
++              messageId,
++              swipeIndex: targetSwipeIndex,
++            });
++          }
++
+           if (activatedTextRewriteRunAgents.length > 0 && messageId && !abortController.signal.aborted) {
+             let currentResponseForRewrite = originalResponseBeforeRewrite;
+ 
+diff --git a/packages/server/src/services/capability-packages/capability-agent-lifecycle.service.ts b/packages/server/src/services/capability-packages/capability-agent-lifecycle.service.ts
+new file mode 100644
+index 000000000..3bb82df56
+--- /dev/null
++++ b/packages/server/src/services/capability-packages/capability-agent-lifecycle.service.ts
+@@ -0,0 +1,35 @@
++import type {
++  CapabilityAgentPipelineSettledEvent,
++  CapabilityAgentPipelineSettledHandler,
++} from "@marinara-engine/shared";
++import { logger } from "../../lib/logger.js";
++
++type Cleanup = () => void;
++
++const agentPipelineSettledHandlers = new Set<CapabilityAgentPipelineSettledHandler>();
++
++export function registerCapabilityAgentPipelineSettledHandler(
++  handler: CapabilityAgentPipelineSettledHandler,
++): Cleanup {
++  agentPipelineSettledHandlers.add(handler);
++  return () => {
++    agentPipelineSettledHandlers.delete(handler);
++  };
++}
++
++export async function dispatchCapabilityAgentPipelineSettled(
++  event: CapabilityAgentPipelineSettledEvent,
++): Promise<void> {
++  const outcomes = await Promise.allSettled(
++    [...agentPipelineSettledHandlers].map((handler) => handler(event)),
++  );
++  for (const outcome of outcomes) {
++    if (outcome.status === "rejected") {
++      logger.warn(outcome.reason, "[capability] agent pipeline settled handler failed");
++    }
++  }
++}
++
++export function resetCapabilityAgentPipelineSettledHandlers(): void {
++  agentPipelineSettledHandlers.clear();
++}
+diff --git a/packages/server/src/services/capability-packages/capability-module-runtime.service.ts b/packages/server/src/services/capability-packages/capability-module-runtime.service.ts
+index 8466087cf..268f529e6 100644
+--- a/packages/server/src/services/capability-packages/capability-module-runtime.service.ts
++++ b/packages/server/src/services/capability-packages/capability-module-runtime.service.ts
+@@ -8,6 +8,7 @@ import type { FastifyInstance } from "fastify";
+ import {
+   registerTurnGameEngine,
+   type AnyTurnGameEngine,
++  type CapabilityAgentPipelineSettledHandler,
+   type CapabilityRuntimeHost,
+   type CapabilityRuntimeLogArgument,
+   type InstalledCapabilityPackage,
+@@ -24,6 +25,7 @@ import {
+   type CapabilityConversationCommandRegistration,
+ } from "./capability-command-registry.service.js";
+ import { registerCapabilityService } from "./capability-service-registry.service.js";
++import { registerCapabilityAgentPipelineSettledHandler } from "./capability-agent-lifecycle.service.js";
+ import { createCapabilityLanguageModelHost } from "./capability-language-model.service.js";
+ import {
+   createCapabilityEmbeddingHost,
+@@ -47,6 +49,7 @@ type CapabilityActivationContext = {
+     registerTurnGameEngine(engine: AnyTurnGameEngine): Cleanup;
+     registerConversationCommand(registration: CapabilityConversationCommandRegistration): Cleanup;
+     registerService<T>(key: string, service: T): Cleanup;
++    registerAgentPipelineSettledHandler(handler: CapabilityAgentPipelineSettledHandler): Cleanup;
+     /** Contribute text to each turn's system prompt. Requires the `prompt-context` permission. */
+     registerPromptContext(contributor: CapabilityPromptContextContributor): Cleanup;
+     registerPrivilegedRoutes(
+@@ -213,6 +216,14 @@ class CapabilityModuleRuntime {
+             return trackCleanup(registerCapabilityConversationCommand(registration));
+           },
+           registerService: (key, service) => trackCleanup(registerCapabilityService(key, service)),
++          registerAgentPipelineSettledHandler: (handler) => {
++            if (!installed.manifest.permissions?.includes("agent-runtime")) {
++              throw new Error(
++                `Capability package ${installed.id} must declare the "agent-runtime" permission to observe agent lifecycle`,
++              );
++            }
++            return trackCleanup(registerCapabilityAgentPipelineSettledHandler(handler));
++          },
+           // Gated on the permission the manifest already declares, so a package can't reach the prompt
+           // without asking for it up front. Contract in capability-prompt-context.service.ts.
+           registerPromptContext: (contributor) => {
+diff --git a/packages/server/src/services/capability-packages/capability-persistence.service.ts b/packages/server/src/services/capability-packages/capability-persistence.service.ts
+index bd02d464e..036cd17be 100644
+--- a/packages/server/src/services/capability-packages/capability-persistence.service.ts
++++ b/packages/server/src/services/capability-packages/capability-persistence.service.ts
+@@ -4,6 +4,7 @@ import {
+   type CapabilityChatRecord,
+   type CapabilityCreateMessageWithSwipeInput,
+   type CapabilityGameStateRecord,
++  type CapabilityTrackedCharacterRecord,
+   type CapabilityRoleplayEventInput,
+   type CapabilityRoleplayEventRecord,
+   type CapabilityDocumentRecord,
+@@ -133,6 +134,46 @@ function parsePresentCharacterIds(value: unknown): string[] {
+   }
+ }
+ 
++function parseTrackedCharacters(value: unknown): CapabilityTrackedCharacterRecord[] {
++  if (typeof value !== "string") return [];
++  try {
++    const parsed = JSON.parse(value) as unknown;
++    if (!Array.isArray(parsed)) return [];
++    return parsed.flatMap((entry) => {
++      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
++      const record = entry as Record<string, unknown>;
++      const characterId =
++        typeof record.characterId === "string"
++          ? record.characterId.trim()
++          : typeof record.id === "string"
++            ? record.id.trim()
++            : "";
++      const name = typeof record.name === "string" ? record.name.trim() : "";
++      if (!characterId || !name) return [];
++
++      return [{
++        characterId,
++        name,
++        ...(typeof record.emoji === "string" ? { emoji: record.emoji } : {}),
++        ...(typeof record.mood === "string" ? { mood: record.mood } : {}),
++        ...(typeof record.appearance === "string" ? { appearance: record.appearance } : {}),
++        ...(typeof record.outfit === "string" ? { outfit: record.outfit } : {}),
++        ...(typeof record.thoughts === "string" ? { thoughts: record.thoughts } : {}),
++        ...(record.customFields &&
++        typeof record.customFields === "object" &&
++        !Array.isArray(record.customFields)
++          ? { customFields: record.customFields as Record<string, unknown> }
++          : {}),
++        ...(Array.isArray(record.stats) ? { stats: record.stats } : {}),
++        ...(typeof record.avatarPath === "string" ? { avatarPath: record.avatarPath } : {}),
++        ...(record.avatarCrop !== undefined ? { avatarCrop: record.avatarCrop } : {}),
++      }];
++    });
++  } catch {
++    return [];
++  }
++}
++
+ function mapGameState(row: typeof gameStateSnapshots.$inferSelect): CapabilityGameStateRecord {
+   return {
+     snapshotId: row.id,
+@@ -404,6 +445,20 @@ function createPersistenceSession(db: DB): CapabilityPersistenceSession {
+         .limit(1);
+       return rows[0] ? mapGameState(rows[0]) : null;
+     },
++    async getCharacterTrackerState(chatId, messageId, swipeIndex) {
++      const rows = await db
++        .select({ presentCharacters: gameStateSnapshots.presentCharacters })
++        .from(gameStateSnapshots)
++        .where(
++          and(
++            eq(gameStateSnapshots.chatId, chatId),
++            eq(gameStateSnapshots.messageId, messageId),
++            eq(gameStateSnapshots.swipeIndex, swipeIndex),
++          ),
++        )
++        .limit(1);
++      return rows[0] ? parseTrackedCharacters(rows[0].presentCharacters) : [];
++    },
+     async appendRoleplayEvent(input: CapabilityRoleplayEventInput): Promise<CapabilityRoleplayEventRecord | null> {
+       const scopedOwner = engineEventOwner(input.chatId);
+       const text = input.text.trim().slice(0, MAX_ROLEPLAY_EVENT_TEXT_CHARS);
+diff --git a/packages/server/src/services/capability-packages/capability-resources.service.ts b/packages/server/src/services/capability-packages/capability-resources.service.ts
+index e71ac5c45..4f55e8eef 100644
+--- a/packages/server/src/services/capability-packages/capability-resources.service.ts
++++ b/packages/server/src/services/capability-packages/capability-resources.service.ts
+@@ -2,6 +2,7 @@ import type {
+   CapabilityCharacterRecord,
+   CapabilityLorebookCreateInput,
+   CapabilityLorebookEntryInput,
++  CapabilityLorebookEntryUpdateInput,
+   CapabilityLorebookEntryRecord,
+   CapabilityLorebookEntrySelection,
+   CapabilityLorebookRecord,
+@@ -14,6 +15,7 @@ import type {
+ import type { DB } from "../../db/connection.js";
+ import { createCharactersStorage } from "../storage/characters.storage.js";
+ import { createLorebooksStorage } from "../storage/lorebooks.storage.js";
++import { syncCharacterBookFromLorebook } from "../lorebook/character-book-sync.js";
+ 
+ type LorebookEntrySource = {
+   id: string;
+@@ -127,12 +129,50 @@ export function createCapabilityResourceHost(db: DB): CapabilityResourceHost {
+       await lorebooks.update(lorebookId, updates);
+     },
+ 
++    async createLorebookEntry(
++      lorebookId: string,
++      entry: CapabilityLorebookEntryInput,
++    ): Promise<CapabilityLorebookEntryRecord> {
++      const record = (await lorebooks.createEntry({
++        ...entry,
++        lorebookId,
++      })) as unknown as LorebookEntrySource | null;
++
++      if (!record) {
++        throw new Error("[capability] createLorebookEntry failed");
++      }
++      await syncCharacterBookFromLorebook(db, record.lorebookId);
++      const books = (await lorebooks.list()) as unknown as Array<{ id: string; name: string }>;
++      const lorebookName = books.find((book) => book.id === record.lorebookId)?.name ?? "Unknown lorebook";
++      return {
++        id: record.id,
++        lorebookId: record.lorebookId,
++        lorebookName,
++        name: record.name,
++        content: record.content,
++        description: record.description,
++      };
++    },
++
+     async bulkCreateLorebookEntries(lorebookId: string, entries: CapabilityLorebookEntryInput[]): Promise<void> {
+       await lorebooks.bulkCreateEntries(lorebookId, entries);
++      await syncCharacterBookFromLorebook(db, lorebookId);
++    },
++
++    async updateLorebookEntry(entryId: string, updates: CapabilityLorebookEntryUpdateInput): Promise<void> {
++      const existing = (await lorebooks.getEntry(entryId)) as unknown as LorebookEntrySource | null;
++      await lorebooks.updateEntry(entryId, updates);
++      if (existing?.lorebookId) {
++        await syncCharacterBookFromLorebook(db, existing.lorebookId);
++      }
+     },
+ 
+     async removeLorebookEntry(entryId: string): Promise<void> {
++      const existing = (await lorebooks.getEntry(entryId)) as unknown as LorebookEntrySource | null;
+       await lorebooks.removeEntry(entryId);
++      if (existing?.lorebookId) {
++        await syncCharacterBookFromLorebook(db, existing.lorebookId);
++      }
+     },
+   };
+ }
+diff --git a/packages/server/src/services/capability-packages/package-manager.service.ts b/packages/server/src/services/capability-packages/package-manager.service.ts
+index c25f804ac..c71e26e6e 100644
+--- a/packages/server/src/services/capability-packages/package-manager.service.ts
++++ b/packages/server/src/services/capability-packages/package-manager.service.ts
+@@ -26,6 +26,7 @@ import { sidecarSpeechService } from "../sidecar/sidecar-speech.service.js";
+ 
+ const ROOT = join(DATA_DIR, "capability-packages");
+ const VERSIONS = join(ROOT, "versions");
++const LOCAL_IMPORTS = join(ROOT, "local-imports");
+ const REGISTRY = join(ROOT, "installed.json");
+ const UPDATE_DECISIONS = join(ROOT, "update-decisions-v1.json");
+ const AVAILABILITY_MIGRATION = join(ROOT, "availability-migration-v1.json");
+@@ -532,21 +533,23 @@ export function findPendingCapabilityPackageUpdates(
+     }));
+ }
+ 
+-async function installCatalogPackage(entry: CapabilityCatalogPackage, activateDuringStartup = false) {
+-  const { manifest, artifact } = entry;
+-  const installIssue = getCapabilityPackageInstallIssue(manifest);
+-  if (installIssue) throw new Error(installIssue);
+-  const initiallyInstalled = (await readRegistry()).packages.find((item) => item.id === manifest.id);
+-  assertNotDowngrade(initiallyInstalled, manifest.version);
+-  const capabilityApiIssue = getCapabilityApiCompatibilityIssue(manifest);
+-  if (capabilityApiIssue) throw new Error(capabilityApiIssue);
+-  if (!supportsEngineVersion(entry, APP_VERSION)) {
+-    throw new Error(`Package requires Marinara Engine ${manifest.engine.min} to below ${manifest.engine.maxExclusive}`);
++async function installPackageArchive(
++  archive: Buffer,
++  options: {
++    expectedManifest?: CapabilityCatalogPackage["manifest"];
++    expectedArtifactBytes?: number;
++    expectedArtifactSha256?: string;
++    activateDuringStartup?: boolean;
++  } = {},
++) {
++  if (archive.byteLength > MAX_ARTIFACT_BYTES) throw new Error("Package artifact is too large");
++  if (options.expectedArtifactBytes !== undefined && archive.byteLength !== options.expectedArtifactBytes) {
++    throw new Error("Downloaded package size does not match the catalog");
++  }
++  if (options.expectedArtifactSha256) {
++    const digest = createHash("sha256").update(archive).digest("hex");
++    if (digest !== options.expectedArtifactSha256) throw new Error("Downloaded package checksum does not match the catalog");
+   }
+-  const archive = await fetchBytes(artifact.url, Math.min(artifact.bytes + 1, MAX_ARTIFACT_BYTES));
+-  if (archive.byteLength !== artifact.bytes) throw new Error("Downloaded package size does not match the catalog");
+-  const digest = createHash("sha256").update(archive).digest("hex");
+-  if (digest !== artifact.sha256) throw new Error("Downloaded package checksum does not match the catalog");
+ 
+   const zip = new AdmZip(archive);
+   const entries = validatePackageArchiveEntries(zip);
+@@ -554,21 +557,41 @@ async function installCatalogPackage(entry: CapabilityCatalogPackage, activateDu
+   if (!manifestEntry || manifestEntry.header.size > MAX_MANIFEST_BYTES) {
+     throw new Error("Package manifest is missing or too large");
+   }
++
+   const installedManifest = capabilityPackageManifestSchema.parse(JSON.parse(manifestEntry.getData().toString("utf8")));
+-  if (JSON.stringify(installedManifest) !== JSON.stringify(manifest)) {
++  if (options.expectedManifest && JSON.stringify(installedManifest) !== JSON.stringify(options.expectedManifest)) {
+     throw new Error("Artifact manifest does not match the catalog");
+   }
++
++  const manifest = installedManifest;
++  const installIssue = getCapabilityPackageInstallIssue(manifest);
++  if (installIssue) throw new Error(installIssue);
++  const initiallyInstalled = (await readRegistry()).packages.find((item) => item.id === manifest.id);
++  assertNotDowngrade(initiallyInstalled, manifest.version);
++  const capabilityApiIssue = getCapabilityApiCompatibilityIssue(manifest);
++  if (capabilityApiIssue) throw new Error(capabilityApiIssue);
++
++  const syntheticEntry = {
++    manifest,
++    artifact: {
++      url: "https://local.invalid/package.zip",
++      sha256: createHash("sha256").update(archive).digest("hex"),
++      bytes: archive.byteLength,
++    },
++  } as CapabilityCatalogPackage;
++  if (!supportsEngineVersion(syntheticEntry, APP_VERSION)) {
++    throw new Error(`Package requires Marinara Engine ${manifest.engine.min} to below ${manifest.engine.maxExclusive}`);
++  }
++
+   const declaredFiles = new Map(installedManifest.files.map((file) => [normalizeArchivePath(file.path), file]));
+-  if (declaredFiles.size !== installedManifest.files.length)
+-    throw new Error("Package manifest declares duplicate files");
+-  // Case-folded too: on the case-insensitive filesystems this app ships to,
+-  // case-only "distinct" declarations extract onto a single file and the
+-  // losing declaration's hash can never verify (review finding on #5091).
++  if (declaredFiles.size !== installedManifest.files.length) throw new Error("Package manifest declares duplicate files");
+   const caseFoldedPaths = new Set(installedManifest.files.map((file) => normalizeArchivePath(file.path).toLowerCase()));
+   if (caseFoldedPaths.size !== installedManifest.files.length)
+     throw new Error("Package manifest declares files that collide on case-insensitive filesystems");
++
+   const payloadEntries = entries.filter((item) => item.entryName !== "manifest.json");
+   if (payloadEntries.length !== declaredFiles.size) throw new Error("Package contains undeclared or missing files");
++
+   const verifiedFiles = new Map<string, Buffer>();
+   for (const item of payloadEntries) {
+     const name = normalizeArchivePath(item.entryName);
+@@ -581,11 +604,13 @@ async function installCatalogPackage(entry: CapabilityCatalogPackage, activateDu
+     }
+     verifiedFiles.set(name, data);
+   }
++
+   for (const entrypoint of Object.values(installedManifest.entrypoints)) {
+     if (entrypoint && !declaredFiles.has(normalizeArchivePath(entrypoint))) {
+       throw new Error(`Package entrypoint is not declared: ${entrypoint}`);
+     }
+   }
++
+   const agentDetailIds = installedManifest.contributions?.agentDetail?.agentIds ?? [];
+   if (agentDetailIds.length > 0 && !installedManifest.entrypoints.client) {
+     throw new Error("Agent detail contributions require a client entrypoint");
+@@ -618,6 +643,7 @@ async function installCatalogPackage(entry: CapabilityCatalogPackage, activateDu
+     await mkdir(dirname(destination), { recursive: true });
+     await rm(destination, { recursive: true, force: true });
+     await rename(temporary, destination);
++
+     const registry = await readRegistry();
+     const previous = registry.packages.find((item) => item.id === manifest.id);
+     assertNotDowngrade(previous, manifest.version);
+@@ -626,7 +652,7 @@ async function installCatalogPackage(entry: CapabilityCatalogPackage, activateDu
+       version: manifest.version,
+       manifest,
+       installedAt: new Date().toISOString(),
+-      status: manifest.restartRequired && !activateDuringStartup ? "restart-required" : "active",
++      status: manifest.restartRequired && !options.activateDuringStartup ? "restart-required" : "active",
+       error: null,
+       readiness: manifest.entrypoints.server ? "pending" : "ready",
+       readinessError: null,
+@@ -645,6 +671,27 @@ async function installCatalogPackage(entry: CapabilityCatalogPackage, activateDu
+   }
+ }
+ 
++async function installCatalogPackage(entry: CapabilityCatalogPackage, activateDuringStartup = false) {
++  const { manifest, artifact } = entry;
++  const installIssue = getCapabilityPackageInstallIssue(manifest);
++  if (installIssue) throw new Error(installIssue);
++  const initiallyInstalled = (await readRegistry()).packages.find((item) => item.id === manifest.id);
++  assertNotDowngrade(initiallyInstalled, manifest.version);
++  const capabilityApiIssue = getCapabilityApiCompatibilityIssue(manifest);
++  if (capabilityApiIssue) throw new Error(capabilityApiIssue);
++  if (!supportsEngineVersion(entry, APP_VERSION)) {
++    throw new Error(`Package requires Marinara Engine ${manifest.engine.min} to below ${manifest.engine.maxExclusive}`);
++  }
++  const archive = await fetchBytes(artifact.url, Math.min(artifact.bytes + 1, MAX_ARTIFACT_BYTES));
++  return installPackageArchive(archive, {
++    expectedManifest: manifest,
++    expectedArtifactBytes: artifact.bytes,
++    expectedArtifactSha256: artifact.sha256,
++    activateDuringStartup,
++  });
++}
++
++
+ export const capabilityPackageManager = {
+   async catalog(fetchCatalog: typeof safeFetch = safeFetch): Promise<CapabilityCatalog> {
+     const response = await fetchCatalog(CATALOG_URL, {
+@@ -1002,6 +1049,21 @@ export const capabilityPackageManager = {
+     return installCatalogPackage(entry);
+   },
+ 
++  /**
++   * Trusted local-development install path. Not exposed over HTTP.
++   * The artifact must live under DATA_DIR/capability-packages/local-imports.
++   */
++  async installLocalArtifact(filename: string) {
++    const name = filename.trim();
++    if (!name || name.includes("/") || name.includes("\\") || !name.toLowerCase().endsWith(".zip")) {
++      throw new Error("Local capability artifact filename is invalid");
++    }
++    const artifactPath = inside(LOCAL_IMPORTS, join(LOCAL_IMPORTS, name));
++    const archive = await readFile(artifactPath);
++    if (archive.byteLength > MAX_ARTIFACT_BYTES) throw new Error("Package artifact is too large");
++    return installPackageArchive(archive);
++  },
++
+   async uninstall(packageId: string) {
+     const registry = await readRegistry();
+     const existing = registry.packages.find((item) => item.id === packageId);
+diff --git a/packages/shared/src/schemas/capability-package.schema.ts b/packages/shared/src/schemas/capability-package.schema.ts
+index 247ce64ca..1bfd7a8b5 100644
+--- a/packages/shared/src/schemas/capability-package.schema.ts
++++ b/packages/shared/src/schemas/capability-package.schema.ts
+@@ -181,7 +181,10 @@ const capabilityPackageManifestBaseSchema = z
+ //        to fold the Game narration box down to its handle for a cutscene beat. It
+ //        never writes the player's stored preference and the engine's safety rules
+ //        still force the box open when it holds something to act on.
+-export const supportedCapabilityApi = Object.freeze({ major: 1, minor: 13 } as const);
++// 1.14: server runtimes may subscribe to the post-persistence agent pipeline
++//        lifecycle; persistence exposes anchored Character Tracker reads; and
++//        resources expose in-place lorebook entry updates.
++export const supportedCapabilityApi = Object.freeze({ major: 1, minor: 14 } as const);
+ 
+ const capabilityApiVersionSchema = z
+   .object({
+diff --git a/packages/shared/src/schemas/chat.schema.ts b/packages/shared/src/schemas/chat.schema.ts
+index 56d3ceb28..b3d6e5b11 100644
+--- a/packages/shared/src/schemas/chat.schema.ts
++++ b/packages/shared/src/schemas/chat.schema.ts
+@@ -53,6 +53,8 @@ export const generateRequestSchema = z.object({
+   narrativeDirectorMode: z.enum(["natural", "random"]).nullable().optional().default(null),
+   generationGuide: z.string().nullable().optional().default(null),
+   generationGuideSource: z.enum(["narrator", "guide", "game_start"]).nullable().optional().default(null),
++  /** Empty Roleplay Send: add a prompt-only user continuation turn without saving it. */
++  roleplayContinue: z.boolean().optional().default(false),
+   agentInjectionOverrides: z
+     .array(
+       z.object({
+diff --git a/packages/shared/src/types/capability-runtime.ts b/packages/shared/src/types/capability-runtime.ts
+index b2fabbbc1..78969db01 100644
+--- a/packages/shared/src/types/capability-runtime.ts
++++ b/packages/shared/src/types/capability-runtime.ts
+@@ -92,12 +92,20 @@ export interface CapabilityLorebookCreateInput {
+   scanDepth?: number;
+   tokenBudget?: number;
+   personaId?: string;
++  /** Bind the lorebook to one Character card. */
++  characterId?: string;
++  /** Bind the lorebook to multiple Character cards. */
++  characterIds?: string[];
+   enabled?: boolean;
+ }
+-/** The retrieval knobs a package may retune on a lorebook it owns. */
++/** The retrieval/ownership knobs a package may retune on a lorebook it owns. */
+ export interface CapabilityLorebookUpdateInput {
+   scanDepth?: number;
+   tokenBudget?: number;
++  /** Replace Character ownership with one Character card. */
++  characterId?: string;
++  /** Replace Character ownership with these Character cards. */
++  characterIds?: string[];
+ }
+ /** One lorebook entry to store. Extra keys pass through to storage; see the index signature below. */
+ export interface CapabilityLorebookEntryInput {
+@@ -108,6 +116,31 @@ export interface CapabilityLorebookEntryInput {
+   [key: string]: unknown;
+ }
+ 
++/** Narrow update surface for an existing lorebook entry. */
++export interface CapabilityLorebookEntryUpdateInput {
++  name?: string;
++  content?: string;
++  description?: string;
++  keys?: string[];
++  secondaryKeys?: string[];
++}
++
++/** One authoritative Character Tracker entry persisted for a message/swipe anchor. */
++export interface CapabilityTrackedCharacterRecord {
++  characterId: string;
++  name: string;
++  emoji?: string;
++  mood?: string;
++  appearance?: string;
++  outfit?: string;
++  thoughts?: string;
++  /** Tracker-defined structured state such as Role, ClientStatus, occupation, etc. */
++  customFields?: Record<string, unknown>;
++  stats?: unknown[];
++  avatarPath?: string;
++  avatarCrop?: unknown;
++}
++
+ export interface CapabilityResourceHost {
+   listCharacters(characterIds?: string[]): Promise<CapabilityCharacterRecord[]>;
+   listPersonas(personaIds?: string[]): Promise<CapabilityPersonaRecord[]>;
+@@ -121,7 +154,12 @@ export interface CapabilityResourceHost {
+   updatePersona?(personaId: string, updates: CapabilityPersonaUpdateInput): Promise<void>;
+   createLorebook?(input: CapabilityLorebookCreateInput): Promise<CapabilityLorebookRecord>;
+   updateLorebook?(lorebookId: string, updates: CapabilityLorebookUpdateInput): Promise<void>;
++  createLorebookEntry?(
++    lorebookId: string,
++    entry: CapabilityLorebookEntryInput,
++  ): Promise<CapabilityLorebookEntryRecord>;
+   bulkCreateLorebookEntries?(lorebookId: string, entries: CapabilityLorebookEntryInput[]): Promise<void>;
++  updateLorebookEntry?(entryId: string, updates: CapabilityLorebookEntryUpdateInput): Promise<void>;
+   removeLorebookEntry?(entryId: string): Promise<void>;
+ }
+ 
+@@ -337,6 +375,15 @@ export interface CapabilityPersistenceSession {
+   listMessages(chatId: string): Promise<CapabilityMessageRecord[]>;
+   /** Read-only. Optional so packages feature-detect and degrade on older Engines. */
+   getGameState?(chatId: string): Promise<CapabilityGameStateRecord | null>;
++  /**
++   * Read authoritative Character Tracker state for one persisted message/swipe
++   * anchor so overlapping Roleplay generations cannot observe a newer turn.
++   */
++  getCharacterTrackerState?(
++    chatId: string,
++    messageId: string,
++    swipeIndex: number,
++  ): Promise<CapabilityTrackedCharacterRecord[]>;
+   appendRoleplayEvent?(input: CapabilityRoleplayEventInput): Promise<CapabilityRoleplayEventRecord | null>;
+   listExistingLorebookEntryIds(entryIds: string[]): Promise<string[]>;
+   createMessageWithSwipe(input: CapabilityCreateMessageWithSwipeInput): Promise<CapabilityMessageRecord>;
+@@ -368,3 +415,15 @@ export interface CapabilityRuntimeHost {
+   persistence: CapabilityPersistenceHost;
+   resources: CapabilityResourceHost;
+ }
++
++/** Fired after ordinary post-processing results for an anchor are finalized and durably applied. */
++export interface CapabilityAgentPipelineSettledEvent {
++  chatId: string;
++  generationId: string;
++  messageId: string;
++  swipeIndex: number;
++}
++
++export type CapabilityAgentPipelineSettledHandler = (
++  event: CapabilityAgentPipelineSettledEvent,
++) => void | Promise<void>;
+diff --git a/scripts/regressions/capability-character-lore-behavior.regression.ts b/scripts/regressions/capability-character-lore-behavior.regression.ts
+new file mode 100644
+index 000000000..22ff952e8
+--- /dev/null
++++ b/scripts/regressions/capability-character-lore-behavior.regression.ts
+@@ -0,0 +1,134 @@
++import assert from "node:assert/strict";
++import { mkdtempSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++const dataDir = mkdtempSync(join(tmpdir(), "marinara-capability-character-lore-behavior-"));
++process.env.DATA_DIR = dataDir;
++
++try {
++  const { getDB, closeDB } = await import("../../packages/server/src/db/connection.js");
++  const { gameStateSnapshots } = await import("../../packages/server/src/db/schema/index.js");
++  const { createCapabilityPersistenceHost } = await import(
++    "../../packages/server/src/services/capability-packages/capability-persistence.service.js"
++  );
++  const { createCapabilityResourceHost } = await import(
++    "../../packages/server/src/services/capability-packages/capability-resources.service.js"
++  );
++
++  const db = await getDB();
++  const persistence = createCapabilityPersistenceHost(db);
++  const resources = createCapabilityResourceHost(db);
++
++  // ── Character Tracker customFields survive the authoritative anchor read. ──
++  const trackerState = [
++    {
++      characterId: "NPC_Eleanor_Marlowe",
++      name: "Mrs. Eleanor Marlowe",
++      emoji: "😟",
++      mood: "despairing",
++      appearance: "Middle-aged woman with a pale complexion.",
++      outfit: "Formal dark day dress; black gloves removed.",
++      thoughts: "I should have listened to her.",
++      customFields: {
++        ClientStatus: "Seeking information about missing daughter",
++        CasePriority: 3,
++        ConfirmedWitness: false,
++      },
++      stats: [{ name: "Nervousness", value: 98, max: 100, color: "#FF0000" }],
++    },
++  ];
++
++  await db.insert(gameStateSnapshots).values({
++    id: "snapshot-character-lore-behavior",
++    chatId: "chat-character-lore-behavior",
++    messageId: "message-character-lore-behavior",
++    swipeIndex: 2,
++    presentCharacters: JSON.stringify(trackerState),
++    worldCustomFields: "[]",
++    recentEvents: "[]",
++    committed: 0,
++    createdAt: "2026-08-21T13:00:00.000Z",
++  });
++
++  assert.equal(
++    typeof persistence.getCharacterTrackerState,
++    "function",
++    "Capability API 1.14 must expose anchored Character Tracker reads",
++  );
++
++  const tracked = await persistence.getCharacterTrackerState!(
++    "chat-character-lore-behavior",
++    "message-character-lore-behavior",
++    2,
++  );
++
++  assert.equal(tracked.length, 1);
++  assert.equal(tracked[0]?.characterId, "NPC_Eleanor_Marlowe");
++  assert.deepEqual(
++    tracked[0]?.customFields,
++    {
++      ClientStatus: "Seeking information about missing daughter",
++      CasePriority: 3,
++      ConfirmedWitness: false,
++    },
++    "Structured Character Tracker customFields must survive the capability anchor read",
++  );
++
++  // ── Character ownership passes through the Capability Lorebook API. ──
++  assert.equal(typeof resources.createLorebook, "function");
++  assert.equal(typeof resources.updateLorebook, "function");
++
++  const created = await resources.createLorebook!({
++    name: "Eva Green — Dynamic Character State",
++    description: "Capability ownership regression fixture.",
++    category: "character",
++    characterId: "character-eva",
++    enabled: true,
++  });
++
++  let [createdReadback] = await resources.listLorebooks([created.id]);
++  assert.ok(createdReadback, "Created lorebook must be readable through CapabilityResourceHost");
++
++  let createdData = createdReadback.data as Record<string, unknown>;
++  assert.equal(createdData.characterId, "character-eva");
++  assert.deepEqual(
++    createdData.characterIds,
++    ["character-eva"],
++    "createLorebook(characterId) must create the Character ownership link",
++  );
++
++  await resources.updateLorebook!(created.id, {
++    characterIds: ["character-eva", "character-anya"],
++  });
++
++  [createdReadback] = await resources.listLorebooks([created.id]);
++  assert.ok(createdReadback);
++
++  createdData = createdReadback.data as Record<string, unknown>;
++  assert.deepEqual(
++    new Set(createdData.characterIds as string[]),
++    new Set(["character-eva", "character-anya"]),
++    "updateLorebook(characterIds) must replace Character ownership links",
++  );
++
++  await resources.updateLorebook!(created.id, {
++    characterId: "character-milla",
++  });
++
++  [createdReadback] = await resources.listLorebooks([created.id]);
++  assert.ok(createdReadback);
++
++  createdData = createdReadback.data as Record<string, unknown>;
++  assert.equal(createdData.characterId, "character-milla");
++  assert.deepEqual(
++    createdData.characterIds,
++    ["character-milla"],
++    "updateLorebook(characterId) must replace multi-Character ownership with the requested Character",
++  );
++
++  await closeDB();
++  console.info("Capability Character/Lore behavioral regression passed.");
++} finally {
++  rmSync(dataDir, { recursive: true, force: true });
++}
+diff --git a/scripts/regressions/capability-character-lore-contract.regression.ts b/scripts/regressions/capability-character-lore-contract.regression.ts
+new file mode 100644
+index 000000000..27bea419d
+--- /dev/null
++++ b/scripts/regressions/capability-character-lore-contract.regression.ts
+@@ -0,0 +1,35 @@
++import assert from "node:assert/strict";
++import { readFile } from "node:fs/promises";
++import { dirname, resolve } from "node:path";
++import { fileURLToPath } from "node:url";
++
++const here = dirname(fileURLToPath(import.meta.url));
++const root = resolve(here, "../..");
++
++const runtimeTypes = await readFile(
++  resolve(root, "packages/shared/src/types/capability-runtime.ts"),
++  "utf8",
++);
++const persistence = await readFile(
++  resolve(root, "packages/server/src/services/capability-packages/capability-persistence.service.ts"),
++  "utf8",
++);
++
++assert.match(
++  runtimeTypes,
++  /interface CapabilityTrackedCharacterRecord[\s\S]*customFields\?: Record<string, unknown>/,
++);
++assert.match(
++  runtimeTypes,
++  /interface CapabilityLorebookCreateInput[\s\S]*characterId\?: string;[\s\S]*characterIds\?: string\[\]/,
++);
++assert.match(
++  runtimeTypes,
++  /interface CapabilityLorebookUpdateInput[\s\S]*characterId\?: string;[\s\S]*characterIds\?: string\[\]/,
++);
++assert.match(
++  persistence,
++  /record\.customFields[\s\S]*customFields: record\.customFields as Record<string, unknown>/,
++);
++
++console.info("Capability Character/Lore contract regression passed.");
+diff --git a/scripts/regressions/capability-character-tracker-anchor.regression.ts b/scripts/regressions/capability-character-tracker-anchor.regression.ts
+new file mode 100644
+index 000000000..df3168d3e
+--- /dev/null
++++ b/scripts/regressions/capability-character-tracker-anchor.regression.ts
+@@ -0,0 +1,171 @@
++import assert from "node:assert/strict";
++import { mkdtempSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++const dataDir = mkdtempSync(join(tmpdir(), "marinara-capability-tracker-anchor-"));
++process.env.DATA_DIR = dataDir;
++process.env.FILE_STORAGE_DIR = join(dataDir, "storage");
++process.env.NODE_ENV = "test";
++process.env.MARINARA_LITE = "true";
++
++let app: {
++  close(): Promise<void>;
++  ready(): Promise<void>;
++  inject(options: Record<string, unknown>): Promise<any>;
++} | null = null;
++
++try {
++  const { buildApp } = await import("../../packages/server/src/app.js");
++  const { getDB } = await import("../../packages/server/src/db/connection.js");
++  const { createGameStateStorage } = await import(
++    "../../packages/server/src/services/storage/game-state.storage.js"
++  );
++  const { createCapabilityPersistenceHost } = await import(
++    "../../packages/server/src/services/capability-packages/capability-persistence.service.js"
++  );
++
++  app = await buildApp();
++  await app.ready();
++
++  const db = await getDB();
++  const gameState = createGameStateStorage(db);
++  const persistence = createCapabilityPersistenceHost(db);
++
++  assert.equal(
++    typeof persistence.getCharacterTrackerState,
++    "function",
++    "Capability API 1.14 must expose anchored Character Tracker reads",
++  );
++
++  const chatResponse = await app.inject({
++    method: "POST",
++    url: "/api/chats",
++    payload: {
++      name: "Capability tracker anchor regression",
++      mode: "roleplay",
++      characterIds: [],
++    },
++  });
++  assert.equal(chatResponse.statusCode, 200);
++  const chat = chatResponse.json();
++
++  const messageResponse = await app.inject({
++    method: "POST",
++    url: `/api/chats/${chat.id}/messages`,
++    payload: {
++      role: "assistant",
++      content: "Eva enters the room.",
++    },
++  });
++  assert.equal(messageResponse.statusCode, 200);
++  const message = messageResponse.json();
++
++  const baseState = {
++    chatId: chat.id,
++    messageId: message.id,
++    date: null,
++    time: null,
++    location: null,
++    weather: null,
++    temperature: null,
++    worldCustomFields: [],
++    recentEvents: [],
++    playerStats: null,
++    personaStats: null,
++    fieldLocks: {},
++    hiddenTrackerFields: {},
++    committed: true,
++  };
++
++  await gameState.create({
++    ...baseState,
++    swipeIndex: 0,
++    presentCharacters: [
++      {
++        characterId: "eva-green",
++        name: "Eva Green",
++        emoji: "🕴️",
++        mood: "focused",
++        appearance: "dark hair",
++        outfit: "Black corset dress with lace gloves.",
++        thoughts: "First swipe.",
++        stats: [],
++        avatarPath: "/eva-0.png",
++        avatarCrop: null,
++      },
++    ],
++  });
++
++  await gameState.create({
++    ...baseState,
++    swipeIndex: 1,
++    presentCharacters: [
++      {
++        characterId: "eva-green",
++        name: "Eva Green",
++        emoji: "🕴️",
++        mood: "calm",
++        appearance: "dark hair",
++        outfit: "White silk blouse with black trousers.",
++        thoughts: "Second swipe.",
++        stats: [],
++        avatarPath: "/eva-1.png",
++        avatarCrop: null,
++      },
++    ],
++  });
++
++  const swipe0 = await persistence.getCharacterTrackerState!(
++    chat.id,
++    message.id,
++    0,
++  );
++
++  const swipe1 = await persistence.getCharacterTrackerState!(
++    chat.id,
++    message.id,
++    1,
++  );
++
++  assert.equal(swipe0.length, 1);
++  assert.equal(swipe1.length, 1);
++
++  assert.equal(swipe0[0]?.characterId, "eva-green");
++  assert.equal(swipe1[0]?.characterId, "eva-green");
++
++  assert.equal(
++    swipe0[0]?.outfit,
++    "Black corset dress with lace gloves.",
++    "swipe 0 must return its own tracker snapshot",
++  );
++
++  assert.equal(
++    swipe1[0]?.outfit,
++    "White silk blouse with black trousers.",
++    "swipe 1 must return its own tracker snapshot",
++  );
++
++  assert.equal(swipe0[0]?.mood, "focused");
++  assert.equal(swipe1[0]?.mood, "calm");
++
++  assert.equal(swipe0[0]?.avatarPath, "/eva-0.png");
++  assert.equal(swipe1[0]?.avatarPath, "/eva-1.png");
++
++  const missingSwipe = await persistence.getCharacterTrackerState!(
++    chat.id,
++    message.id,
++    99,
++  );
++
++  assert.deepEqual(
++    missingSwipe,
++    [],
++    "an unknown anchor must not fall back to the latest tracker snapshot",
++  );
++
++  console.info("Capability Character Tracker anchor regression passed.");
++} finally {
++  await app?.close();
++  rmSync(dataDir, { recursive: true, force: true });
++}
+diff --git a/scripts/regressions/capability-embedded-lorebook-sync.regression.ts b/scripts/regressions/capability-embedded-lorebook-sync.regression.ts
+new file mode 100644
+index 000000000..29d56c1e9
+--- /dev/null
++++ b/scripts/regressions/capability-embedded-lorebook-sync.regression.ts
+@@ -0,0 +1,48 @@
++import assert from "node:assert/strict";
++import { readFile } from "node:fs/promises";
++import { dirname, resolve } from "node:path";
++import { fileURLToPath } from "node:url";
++
++const here = dirname(fileURLToPath(import.meta.url));
++const root = resolve(here, "../..");
++
++const source = await readFile(
++  resolve(
++    root,
++    "packages/server/src/services/capability-packages/capability-resources.service.ts",
++  ),
++  "utf8",
++);
++
++assert.match(
++  source,
++  /import \{ syncCharacterBookFromLorebook \} from "\.\.\/lorebook\/character-book-sync\.js";/,
++);
++
++for (const marker of [
++  "createLorebookEntry",
++  "bulkCreateLorebookEntries",
++  "updateLorebookEntry",
++  "removeLorebookEntry",
++]) {
++  const index = source.indexOf(`async ${marker}`);
++  assert.notEqual(index, -1, `${marker} must exist`);
++  const tail = source.slice(index, index + 1300);
++  assert.match(
++    tail,
++    /syncCharacterBookFromLorebook\(db,/,
++    `${marker} must mirror embedded Character Book state`,
++  );
++}
++
++assert.match(
++  source,
++  /async updateLorebookEntry[\s\S]*?lorebooks\.getEntry\(entryId\)[\s\S]*?lorebooks\.updateEntry\(entryId, updates\)[\s\S]*?syncCharacterBookFromLorebook\(db, existing\.lorebookId\)/,
++);
++
++assert.match(
++  source,
++  /async removeLorebookEntry[\s\S]*?lorebooks\.getEntry\(entryId\)[\s\S]*?lorebooks\.removeEntry\(entryId\)[\s\S]*?syncCharacterBookFromLorebook\(db, existing\.lorebookId\)/,
++);
++
++console.info("Capability embedded Character Lorebook sync regression passed.");
+diff --git a/scripts/regressions/capability-lorebook-entry-write.regression.ts b/scripts/regressions/capability-lorebook-entry-write.regression.ts
+new file mode 100644
+index 000000000..3c5237478
+--- /dev/null
++++ b/scripts/regressions/capability-lorebook-entry-write.regression.ts
+@@ -0,0 +1,81 @@
++import assert from "node:assert/strict";
++import { mkdtempSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++const dataDir = mkdtempSync(join(tmpdir(), "marinara-capability-lorebook-entry-"));
++process.env.DATA_DIR = dataDir;
++process.env.FILE_STORAGE_DIR = join(dataDir, "storage");
++process.env.NODE_ENV = "test";
++process.env.MARINARA_LITE = "true";
++
++let app: {
++  close(): Promise<void>;
++  ready(): Promise<void>;
++} | null = null;
++
++try {
++  const { buildApp } = await import("../../packages/server/src/app.js");
++  const { getDB } = await import("../../packages/server/src/db/connection.js");
++  const { createCapabilityResourceHost } = await import(
++    "../../packages/server/src/services/capability-packages/capability-resources.service.js"
++  );
++
++  app = await buildApp();
++  await app.ready();
++
++  const db = await getDB();
++  const resources = createCapabilityResourceHost(db);
++
++  assert.equal(typeof resources.createLorebook, "function");
++  assert.equal(
++    typeof resources.createLorebookEntry,
++    "function",
++    "Capability API 1.14 must return the created lorebook entry identity",
++  );
++  assert.equal(typeof resources.updateLorebookEntry, "function");
++
++  const lorebook = await resources.createLorebook!({
++    name: "Character Lore Sync regression",
++    description: "Capability API 1.14 entry identity regression.",
++    category: "world",
++    enabled: true,
++  });
++
++  const created = await resources.createLorebookEntry!(lorebook.id, {
++    name: "Eva Green - Current Outfit",
++    content: "Eva Green is currently wearing: Black corset dress with lace gloves.",
++    keys: ["Eva Green"],
++    description: "Managed by Character Lore Sync.",
++  });
++
++  assert.ok(created.id, "created entry must expose its durable id");
++  assert.equal(created.lorebookId, lorebook.id);
++  assert.equal(created.lorebookName, "Character Lore Sync regression");
++  assert.equal(created.name, "Eva Green - Current Outfit");
++  assert.match(created.content, /Black corset dress/);
++
++  await resources.updateLorebookEntry!(created.id, {
++    content: "Eva Green is currently wearing: White silk blouse with black trousers.",
++    keys: ["Eva Green"],
++  });
++
++  const [updated] = await resources.listEligibleLorebookEntries({
++    lorebookIds: [],
++    entryIds: [created.id],
++  });
++
++  assert.ok(updated, "created entry must remain addressable by the returned id");
++  assert.equal(updated.id, created.id);
++  assert.equal(updated.lorebookId, lorebook.id);
++  assert.equal(
++    updated.content,
++    "Eva Green is currently wearing: White silk blouse with black trousers.",
++    "the same durable entry id must be updated in place",
++  );
++
++  console.info("Capability lorebook entry write regression passed.");
++} finally {
++  await app?.close();
++  rmSync(dataDir, { recursive: true, force: true });
++}
+diff --git a/scripts/regressions/capability-package-lifecycle.regression.ts b/scripts/regressions/capability-package-lifecycle.regression.ts
+index 323f2d5cf..aaa319398 100644
+--- a/scripts/regressions/capability-package-lifecycle.regression.ts
++++ b/scripts/regressions/capability-package-lifecycle.regression.ts
+@@ -104,7 +104,7 @@ try {
+   const legacyManifest = capabilityPackageManifestSchema.parse(installedPackage("legacy", ["agent"]).manifest);
+   assert.equal(legacyManifest.schemaVersion, 1, "Existing manifest v1 packages must remain readable");
+   assert.equal(getCapabilityApiCompatibilityIssue(legacyManifest), null);
+-  assert.deepEqual(supportedCapabilityApi, { major: 1, minor: 13 });
++  assert.deepEqual(supportedCapabilityApi, { major: 1, minor: 14 });
+ 
+   const manifestV2 = capabilityPackageManifestSchema.parse({
+     ...legacyManifest,
+@@ -140,22 +140,56 @@ try {
+   });
+   assert.match(
+     getCapabilityApiCompatibilityIssue(unsupportedMajorManifest) ?? "",
+-    /requires capability API 2\.0; this Engine supports 1\.13/,
++    /requires capability API 2\.0; this Engine supports 1\.14/,
+   );
+   const currentMinorManifest = capabilityPackageManifestSchema.parse({
+     ...manifestV2,
+-    capabilityApi: { major: 1, minor: 13 },
++    capabilityApi: { major: 1, minor: 14 },
+   });
+   assert.equal(getCapabilityApiCompatibilityIssue(currentMinorManifest), null);
+   const unsupportedMinorManifest = capabilityPackageManifestSchema.parse({
+     ...manifestV2,
+-    capabilityApi: { major: 1, minor: 14 },
++    capabilityApi: { major: 1, minor: 15 },
+   });
+   assert.match(
+     getCapabilityApiCompatibilityIssue(unsupportedMinorManifest) ?? "",
+-    /requires capability API 1\.14; this Engine supports 1\.13/,
++    /requires capability API 1\.15; this Engine supports 1\.14/,
+   );
+ 
++  const {
++    dispatchCapabilityAgentPipelineSettled,
++    registerCapabilityAgentPipelineSettledHandler,
++    resetCapabilityAgentPipelineSettledHandlers,
++  } = await import(
++    "../../packages/server/src/services/capability-packages/capability-agent-lifecycle.service.js"
++  );
++  resetCapabilityAgentPipelineSettledHandlers();
++  const lifecycleCalls: string[] = [];
++  const cleanupFirst = registerCapabilityAgentPipelineSettledHandler(async (event) => {
++    lifecycleCalls.push(`first:${event.messageId}:${event.swipeIndex}`);
++  });
++  const cleanupBroken = registerCapabilityAgentPipelineSettledHandler(async () => {
++    throw new Error("expected lifecycle regression failure");
++  });
++  const cleanupSecond = registerCapabilityAgentPipelineSettledHandler(async (event) => {
++    lifecycleCalls.push(`second:${event.generationId}`);
++  });
++  await dispatchCapabilityAgentPipelineSettled({
++    chatId: "chat-1",
++    generationId: "generation-1",
++    messageId: "message-1",
++    swipeIndex: 2,
++  });
++  assert.deepEqual(
++    lifecycleCalls,
++    ["first:message-1:2", "second:generation-1"],
++    "all lifecycle subscribers run and one failure does not suppress the others",
++  );
++  cleanupFirst();
++  cleanupBroken();
++  cleanupSecond();
++  resetCapabilityAgentPipelineSettledHandlers();
++
+   const forwardCompatibleCatalog = capabilityCatalogSchema.parse({
+     schemaVersion: 1,
+     generatedAt: "2026-07-16T00:00:00.000Z",
+diff --git a/scripts/regressions/character-lore-sync-semantics.regression.ts b/scripts/regressions/character-lore-sync-semantics.regression.ts
+new file mode 100644
+index 000000000..6853b8624
+--- /dev/null
++++ b/scripts/regressions/character-lore-sync-semantics.regression.ts
+@@ -0,0 +1,427 @@
++import assert from "node:assert/strict";
++import { pathToFileURL } from "node:url";
++
++const serverPath = process.env.CHARACTER_LORE_SYNC_SERVER;
++if (!serverPath) {
++  throw new Error(
++    "CHARACTER_LORE_SYNC_SERVER must point to the Character Lore Sync server.mjs under test",
++  );
++}
++
++const module = await import(`${pathToFileURL(serverPath).href}?test=${Date.now()}`);
++assert.equal(typeof module.activate, "function", "Capability package must export activate()");
++
++type Entry = {
++  id: string;
++  lorebookId: string;
++  name: string;
++  content: string;
++  description: string;
++  keys: string[];
++  secondaryKeys: string[];
++  enabled?: boolean;
++  constant?: boolean;
++  [key: string]: unknown;
++};
++
++const cardCharacterId = "character-eva";
++const npcCharacterId = "NPC_Eleanor_Marlowe";
++const cardLorebookId = "book-eva";
++const worldLorebookId = "book-alderwick";
++
++const lorebooks = new Map<string, {
++  id: string;
++  data: Record<string, unknown>;
++  entries: Entry[];
++}>([
++  [
++    cardLorebookId,
++    {
++      id: cardLorebookId,
++      data: {
++        name: "Eva Green — Eva Green",
++        category: "character",
++        characterId: cardCharacterId,
++        characterIds: [cardCharacterId],
++        enabled: true,
++      },
++      entries: [],
++    },
++  ],
++  [
++    worldLorebookId,
++    {
++      id: worldLorebookId,
++      data: {
++        name: "Alderwick",
++        category: "chat",
++        enabled: true,
++      },
++      entries: [],
++    },
++  ],
++]);
++
++const evaCard = {
++  id: cardCharacterId,
++  data: JSON.stringify({
++    name: "Eva Green",
++    tags: [
++      "Ева",
++      "Ева Грин",
++      "Еве",
++      "Еву",
++      "Евой",
++      "Евы",
++      "Eva Green",
++      "Eva",
++    ],
++  }),
++  comment: "",
++};
++
++const trackerByMessage = new Map<string, unknown[]>([
++  [
++    "message-1",
++    [
++      {
++        characterId: cardCharacterId,
++        name: "Eva Green",
++        outfit: "Black silk corset, mini-skirt, stockings and gloves.",
++      },
++      {
++        characterId: npcCharacterId,
++        name: "Mrs. Eleanor Marlowe",
++        mood: "anxious",
++        appearance: "Middle-aged woman with pale skin and hair in a tight bun.",
++        outfit: "Victorian dark day dress and gloves.",
++        thoughts: "I must find Lydia.",
++        customFields: {
++          Relation: "Mother of Lydia",
++        },
++        stats: [
++          {
++            name: "Desperation",
++            value: 85,
++            max: 100,
++          },
++        ],
++      },
++    ],
++  ],
++  [
++    "message-2",
++    [
++      {
++        characterId: cardCharacterId,
++        name: "Eva Green",
++        outfit: "Black fitted evening dress and long gloves.",
++      },
++    ],
++  ],
++  [
++    "message-3",
++    [
++      {
++        characterId: npcCharacterId,
++        name: "Mrs. Eleanor Marlowe",
++        mood: "relieved",
++        appearance: "Middle-aged woman with pale skin and hair in a tight bun.",
++        outfit: "Victorian dark day dress, gloves removed.",
++        thoughts: "Perhaps they can really help me.",
++        customFields: {
++          Relation: "Mother of Lydia",
++        },
++        stats: [
++          {
++            name: "Desperation",
++            value: 70,
++            max: 100,
++          },
++        ],
++      },
++    ],
++  ],
++]);
++
++let document: any = null;
++let documentRevision = 0;
++let registeredHandler: ((event: any) => Promise<void>) | null = null;
++let entrySequence = 0;
++const removedEntryIds: string[] = [];
++
++function allEntries(): Entry[] {
++  return [...lorebooks.values()].flatMap((book) => book.entries);
++}
++
++function findEntry(entryId: string): Entry | null {
++  return allEntries().find((entry) => entry.id === entryId) ?? null;
++}
++
++const persistence = {
++  documents: {
++    async getById(_packageId: string, _id: string) {
++      return document;
++    },
++    async create(input: any) {
++      documentRevision += 1;
++      document = {
++        ...input,
++        revision: documentRevision,
++      };
++      return document;
++    },
++    async update(input: any) {
++      assert.equal(input.expectedRevision, document?.revision);
++      documentRevision += 1;
++      document = {
++        ...document,
++        ...input,
++        revision: documentRevision,
++      };
++      return document;
++    },
++  },
++  async withChatLock(_chatId: string, fn: () => Promise<void>) {
++    return fn();
++  },
++  async getChat(chatId: string) {
++    return {
++      id: chatId,
++      name: "Regression Chat",
++      metadata: JSON.stringify({
++        activeLorebookIds: [worldLorebookId],
++      }),
++    };
++  },
++  async getCharacterTrackerState(
++    _chatId: string,
++    messageId: string,
++    _swipeIndex: number,
++  ) {
++    return trackerByMessage.get(messageId) ?? [];
++  },
++  async listExistingLorebookEntryIds(entryIds: string[]) {
++    const existing = new Set(allEntries().map((entry) => entry.id));
++    return entryIds.filter((id) => existing.has(id));
++  },
++};
++
++const resources = {
++  async listCharacters(characterIds?: string[]) {
++    if (!characterIds || characterIds.includes(cardCharacterId)) return [evaCard];
++    return [];
++  },
++
++  async listLorebooks(lorebookIds?: string[]) {
++    const books = lorebookIds
++      ? lorebookIds.map((id) => lorebooks.get(id)).filter(Boolean)
++      : [...lorebooks.values()];
++
++    return books.map((book: any) => ({
++      id: book.id,
++      data: book.data,
++      entries: book.entries.map((entry: Entry) => ({ ...entry })),
++    }));
++  },
++
++  async createLorebook(input: any) {
++    const id = `created-book-${lorebooks.size + 1}`;
++    const book = { id, data: { ...input }, entries: [] as Entry[] };
++    lorebooks.set(id, book);
++    return { id, data: book.data, entries: [] };
++  },
++
++  async createLorebookEntry(lorebookId: string, input: any) {
++    const book = lorebooks.get(lorebookId);
++    assert.ok(book, `Unknown lorebook ${lorebookId}`);
++    entrySequence += 1;
++    const entry: Entry = {
++      id: `entry-${entrySequence}`,
++      lorebookId,
++      name: input.name,
++      content: input.content,
++      description: input.description,
++      keys: [...(input.keys ?? [])],
++      secondaryKeys: [...(input.secondaryKeys ?? [])],
++      ...input,
++    };
++    book.entries.push(entry);
++    return {
++      id: entry.id,
++      lorebookId,
++      lorebookName: String(book.data.name ?? lorebookId),
++      name: entry.name,
++      content: entry.content,
++      description: entry.description,
++    };
++  },
++
++  async updateLorebookEntry(entryId: string, updates: any) {
++    const entry = findEntry(entryId);
++    assert.ok(entry, `Unknown entry ${entryId}`);
++    Object.assign(entry, updates);
++  },
++
++  async removeLorebookEntry(entryId: string) {
++    removedEntryIds.push(entryId);
++    for (const book of lorebooks.values()) {
++      const index = book.entries.findIndex((entry) => entry.id === entryId);
++      if (index >= 0) {
++        book.entries.splice(index, 1);
++        return;
++      }
++    }
++  },
++};
++
++const logger = {
++  info() {},
++  debug() {},
++  warn() {},
++  error() {},
++};
++
++const cleanup = await module.activate({
++  api: {
++    runtime: {
++      persistence,
++      resources,
++      logger,
++    },
++    registerAgentPipelineSettledHandler(handler: (event: any) => Promise<void>) {
++      registeredHandler = handler;
++      return () => {
++        registeredHandler = null;
++      };
++    },
++  },
++});
++
++assert.equal(typeof cleanup, "function");
++assert.ok(registeredHandler);
++
++await registeredHandler!({
++  chatId: "chat-1",
++  generationId: "generation-1",
++  messageId: "message-1",
++  swipeIndex: 0,
++});
++
++const evaEntry = lorebooks
++  .get(cardLorebookId)!
++  .entries.find((entry) => entry.name === "Eva Green - Current Outfit");
++
++assert.ok(evaEntry, "Card Character Current Outfit entry must be created");
++assert.equal(evaEntry.constant, true, "Card Character Current Outfit remains constant");
++assert.match(
++  evaEntry.description,
++  /Current outfit and worn-item state for Eva Green/,
++  "Card Character Description must be character-specific",
++);
++assert.match(
++  evaEntry.description,
++  /Character Tracker state/,
++  "Card Character Description must identify Tracker provenance",
++);
++assert.deepEqual(
++  new Set(evaEntry.keys),
++  new Set([
++    "Eva Green",
++    "Eva",
++    "Ева",
++    "Ева Грин",
++    "Еве",
++    "Еву",
++    "Евой",
++    "Евы",
++  ]),
++  "Card Character Current Outfit must use full name, short name, and card tags",
++);
++
++const npcEntry = lorebooks
++  .get(worldLorebookId)!
++  .entries.find((entry) => entry.name === "Mrs. Eleanor Marlowe - Current State");
++
++assert.ok(npcEntry, "NPC persistent memory entry must be created");
++assert.equal(
++  npcEntry.constant,
++  false,
++  "NPC memory must be keyword-activated, never constant scene context",
++);
++assert.deepEqual(
++  npcEntry.keys,
++  [
++    "Mrs. Eleanor Marlowe",
++    "Mrs. Marlowe",
++    "Eleanor Marlowe",
++    "Mrs. Eleanor",
++    "Eleanor",
++  ],
++  "NPC aliases must be conservative and deterministic",
++);
++assert.match(
++  npcEntry.description,
++  /Persistent memory for Mrs\. Eleanor Marlowe/,
++  "NPC Description must be tied to the concrete NPC",
++);
++assert.match(npcEntry.content, /persistent NPC record/);
++assert.match(npcEntry.content, /Last known mood: anxious/);
++assert.match(npcEntry.content, /Last known outfit:/);
++assert.match(npcEntry.content, /Relation: Mother of Lydia/);
++assert.match(npcEntry.content, /Desperation: 85\/100/);
++
++const npcEntryId = npcEntry.id;
++
++await registeredHandler!({
++  chatId: "chat-1",
++  generationId: "generation-2",
++  messageId: "message-2",
++  swipeIndex: 0,
++});
++
++assert.ok(
++  findEntry(npcEntryId),
++  "NPC memory must persist when NPC disappears from current Character Tracker state",
++);
++assert.ok(
++  !removedEntryIds.includes(npcEntryId),
++  "NPC memory must not be deleted merely because NPC left the scene",
++);
++
++const updatedEva = findEntry(evaEntry.id);
++assert.ok(updatedEva);
++assert.match(
++  updatedEva.content,
++  /Black fitted evening dress and long gloves/,
++  "Card Current Outfit must stable-upsert on later Tracker state",
++);
++
++await registeredHandler!({
++  chatId: "chat-1",
++  generationId: "generation-3",
++  messageId: "message-3",
++  swipeIndex: 0,
++});
++
++const returnedNpc = findEntry(npcEntryId);
++assert.ok(
++  returnedNpc,
++  "Returning NPC must update the same persistent Lore entry instead of creating a new identity",
++);
++assert.match(returnedNpc.content, /Last known mood: relieved/);
++assert.match(returnedNpc.content, /Desperation: 70\/100/);
++
++const matchingNpcEntries = lorebooks
++  .get(worldLorebookId)!
++  .entries.filter((entry) => entry.name === "Mrs. Eleanor Marlowe - Current State");
++
++assert.equal(
++  matchingNpcEntries.length,
++  1,
++  "Returning NPC must not create duplicate persistent memories",
++);
++
++cleanup();
++
++console.info("Character Lore Sync semantic behavior regression passed.");
+diff --git a/scripts/regressions/post-generation-character-resource-refresh.regression.ts b/scripts/regressions/post-generation-character-resource-refresh.regression.ts
+new file mode 100644
+index 000000000..3fe70857c
+--- /dev/null
++++ b/scripts/regressions/post-generation-character-resource-refresh.regression.ts
+@@ -0,0 +1,28 @@
++import assert from "node:assert/strict";
++import { readFile } from "node:fs/promises";
++import { dirname, resolve } from "node:path";
++import { fileURLToPath } from "node:url";
++
++const here = dirname(fileURLToPath(import.meta.url));
++const root = resolve(here, "../..");
++
++const source = await readFile(
++  resolve(root, "packages/client/src/hooks/use-generate.ts"),
++  "utf8",
++);
++
++const marker = "Capability packages can mutate character-linked Lorebooks after the";
++const index = source.indexOf(marker);
++
++assert.notEqual(index, -1);
++
++const block = source.slice(Math.max(0, index - 900), index + 3200);
++
++assert.match(block, /await refreshVisibleGameStateAfterGeneration\(params\.chatId\);/);
++assert.match(block, /parseChatCharacterIds\(chatForResourceRefresh\?\.characterIds\)/);
++assert.match(block, /characterKeys\.detail\(characterId\)/);
++assert.match(block, /exact: true,[\s\S]*?refetchType: "active"/);
++assert.match(block, /characterKeys\.list\(\)/);
++assert.match(block, /lorebookKeys\.active\(params\.chatId\)/);
++
++console.info("Post-generation Character resource refresh regression passed.");

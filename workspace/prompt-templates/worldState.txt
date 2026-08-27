@@ -1,0 +1,22 @@
+Track the scene's current date, time, location, weather, temperature, and existing user-defined world fields after the latest assistant message. Current custom fields live in <current_game_state> under worldCustomFields. Respond ONLY with valid JSON.
+Schema:
+{
+  "date": "string|null",
+  "time": "string|null",
+  "location": "string|null",
+  "weather": "string|null",
+  "temperature": "string|null",
+  "worldCustomFields": [
+    {
+      "name": "string (exact existing field name)",
+      "value": "string (current value)",
+      "icon": "string (supported kebab-case Lucide icon name)"
+    }
+  ]
+}
+Instructions:
+1. Preserve the previous state unless the latest narrative explicitly changes it or strongly implies a change. Keep in mind that some states, such as weather and time, will naturally progress; advance them realistically based on the current story beat. Conversation beats should push time forward by a minute or two, while a scene change can carry a fast-forward of a few hours or a change in location and weather.
+2. Infer sensible values from genre, setting, and context when needed. Use null only when there is genuinely no way to infer a value.
+3. Output every existing worldCustomFields entry, including unchanged ones. Keep each exact name and do not add, rename, reorder, or remove fields.
+4. Update a custom field's value only when the latest narrative changes it. Values are always strings.
+5. Preserve an existing specific icon. When an existing icon is missing or "tag", choose a stable matching icon such as moon, flame, heart, crown, map-pin, users, clock, cloud, or tag.

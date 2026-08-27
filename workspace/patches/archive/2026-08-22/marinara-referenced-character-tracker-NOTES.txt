@@ -1,0 +1,62 @@
+Marinara Engine — Referenced Character Tracker Identity Patch
+
+Goal
+====
+Allow Character Tracker to canonicalize a character against a Character Card that
+is referenced from an activated Lorebook entry with {{CharacterID}}, even when that
+character is NOT attached to the current roleplay/chat roster.
+
+Why
+===
+Current behavior:
+  activated lore entry -> {{CharacterID}} -> main generation knows the card
+  Character Tracker -> agentContext.characters only contains attached characters
+  applyTrackerCharacterCardIdentity(...) cannot see the referenced card
+  -> Tracker creates a separate identity.
+
+Desired behavior:
+  activated lore entry -> {{CharacterID}}
+  -> referenced card is added ONLY to tracker identity candidates
+  -> applyTrackerCharacterCardIdentity(...) matches by ID/name
+  -> canonical Character Card ID is stored in PresentCharacter.characterId.
+
+Files
+=====
+1. packages/server/src/services/prompt/index.ts
+   Export extractCharacterReferenceIds.
+
+2. packages/server/src/routes/generate/retry-agents-route.ts
+   Before applyTrackerCharacterCardIdentity(...):
+   - extract Character IDs from activatedLorebookEntries
+   - load those Character Cards
+   - append them to identity candidates
+   - canonicalize as usual.
+
+Important
+=========
+The patch file contains placeholder hunk line numbers (XXXX) because the repository
+was inspected through the GitHub API rather than cloned locally. Apply the logical
+change around the existing exact line:
+
+    applyTrackerCharacterCardIdentity(presentCharacters, agentContext.characters);
+
+The code is intentionally limited to activated lore entries. A Constant structure
+entry that merely names characters will NOT load their cards unless it contains
+their {{CharacterID}} macros.
+
+Recommended first test
+======================
+Keep Eva NOT attached to the roleplay.
+
+Normal Lore entry:
+  Keys: Eva Green, Eva, Ева Грин, Ева
+  Content: {{hOOM5_L931hp6VwPgzmzS}}
+
+Generate a turn where Eva is present.
+
+Expected Tracker result:
+  characterId: "hOOM5_L931hp6VwPgzmzS"
+  name: "Eva Green"
+  avatarPath: the Character Card avatar
+
+Eleanor or other ordinary NPCs should remain unchanged.
