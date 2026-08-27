@@ -22,6 +22,7 @@
 - Созданы `CONTENTS.md`, `TECHNICAL_INFO.md`, `README.md` и путеводитель мира `lore/The-Pentad-Bureau/WORLD_GUIDE.md`.
 - Созданы `AGENTS.md`, `PATCHES.md` и `RUNBOOK.md` для единых правил работы, контроля патчей и сопровождения сервера.
 - Добавлен манифест `backup/README.md`: архив бэкапа остаётся локальным, а его размер и SHA-256 зафиксированы для будущего Git-зеркала.
+- Подготовлено Git-зеркало `workspace/` в ветке `codex/workspace-mirror`; открыт черновой PR [#2](https://github.com/babichandrei-cell/Marinara-Engine/pull/2) в `staging`. В зеркале 61 файл, ZIP-бэкап исключён намеренно.
 - Подключения вынесены в корневую папку `connections/`.
 - Материалы кампании перенесены в `lore/The-Pentad-Bureau/`.
 - В корне `patches/` оставлены только два актуальных патча; остальные сохранены в датированных архивах.
