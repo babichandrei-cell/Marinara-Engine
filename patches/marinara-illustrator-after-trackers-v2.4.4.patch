@@ -1,0 +1,91 @@
+diff --git a/packages/server/src/services/agents/agent-pipeline.ts b/packages/server/src/services/agents/agent-pipeline.ts
+index 424e1b192..138749f9a 100644
+--- a/packages/server/src/services/agents/agent-pipeline.ts
++++ b/packages/server/src/services/agents/agent-pipeline.ts
+@@ -68,6 +68,7 @@ interface AgentGroup {
+ 
+ export const AGENT_PHASE_MAX_CONCURRENT_GROUPS = 8;
+ const AGENT_GROUP_MAX_CONCURRENT_TOOL_CALLS = 4;
++const ILLUSTRATOR_CURRENT_TURN_AGENT_TYPES = new Set(["world-state", "custom-tracker", "character-tracker"]);
+ 
+ export function normalizeAgentMaxParallelJobs(value: unknown): number {
+   const numeric = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+@@ -449,6 +450,43 @@ export interface AgentPipelineResult {
+   allResults: AgentResult[];
+ }
+ 
++function collectIllustratorCurrentTurnAgentResults(results: AgentResult[]): Record<string, unknown> | null {
++  const currentTurnResults: Record<string, unknown> = {};
++  for (const result of results) {
++    if (!result.success || result.data == null || !ILLUSTRATOR_CURRENT_TURN_AGENT_TYPES.has(result.agentType)) continue;
++    currentTurnResults[result.agentType] = result.data;
++  }
++  if (Object.keys(currentTurnResults).length === 0) return null;
++
++  return {
++    instruction:
++      "These tracker results were produced for the assistant response being illustrated. They are newer than saved agent outputs and persisted game-state context; use them as the authoritative current-turn world, scene, character, appearance, and outfit state wherever they apply.",
++    results: currentTurnResults,
++  };
++}
++
++function withIllustratorCurrentTurnAgentResults(context: AgentContext, results: AgentResult[]): AgentContext {
++  const overlay = collectIllustratorCurrentTurnAgentResults(results);
++  if (!overlay) return context;
++
++  const existingAgentResults = context.memory._agentResults;
++  const existingRecord =
++    existingAgentResults && typeof existingAgentResults === "object" && !Array.isArray(existingAgentResults)
++      ? (existingAgentResults as Record<string, unknown>)
++      : {};
++
++  return {
++    ...context,
++    memory: {
++      ...context.memory,
++      _agentResults: {
++        ...existingRecord,
++        currentTurnTrackerUpdates: overlay,
++      },
++    },
++  };
++}
++
+ /**
+  * Run ALL enabled agents across the full pipeline.
+  * Call `preGenerate` before generating, fire `runParallel` concurrently
+@@ -523,7 +561,33 @@ export function createAgentPipeline(
+             fullContext,
+           )
+         : fullContext;
+-      return runPostProcessingAgents(agents, preparedContext, wrappedOnResult, resolveAgentContext);
++      const postProcessingAgents = agents.filter((agent) => agent.phase === "post_processing");
++      const trackerAgents = postProcessingAgents.filter((agent) =>
++        ILLUSTRATOR_CURRENT_TURN_AGENT_TYPES.has(agent.type),
++      );
++      const illustratorAgents = postProcessingAgents.filter((agent) => agent.type === "illustrator");
++
++      // The Illustrator must see state produced in this turn, rather than the
++      // prior saved state. Keep independent post-processing agents concurrent.
++      if (trackerAgents.length > 0 && illustratorAgents.length > 0) {
++        const otherAgents = postProcessingAgents.filter(
++          (agent) => agent.type !== "illustrator" && !ILLUSTRATOR_CURRENT_TURN_AGENT_TYPES.has(agent.type),
++        );
++        const [trackerResults, otherResults] = await Promise.all([
++          runPostProcessingAgents(trackerAgents, preparedContext, wrappedOnResult, resolveAgentContext),
++          runPostProcessingAgents(otherAgents, preparedContext, wrappedOnResult, resolveAgentContext),
++        ]);
++        const illustratorContext = withIllustratorCurrentTurnAgentResults(preparedContext, allResults);
++        const illustratorResults = await runPostProcessingAgents(
++          illustratorAgents,
++          illustratorContext,
++          wrappedOnResult,
++          resolveAgentContext,
++        );
++        return [...trackerResults, ...otherResults, ...illustratorResults];
++      }
++
++      return runPostProcessingAgents(postProcessingAgents, preparedContext, wrappedOnResult, resolveAgentContext);
+     },
+ 
+     /** All results collected so far. */
