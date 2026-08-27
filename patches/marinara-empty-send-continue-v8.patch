@@ -1,0 +1,49 @@
+--- a/packages/client/src/components/chat/ChatInput.tsx
++++ b/packages/client/src/components/chat/ChatInput.tsx
+@@ -898,6 +898,7 @@
+           await generateWithNarrativeDirector({
+             chatId: activeChatId,
+             connectionId: null,
++            ...(mode === "roleplay" && lastMsg.role === "assistant" ? { roleplayContinue: true } : {}),
+           });
+         } catch (error) {
+           const msg = error instanceof Error ? error.message : "Generation failed";
+--- a/packages/client/src/hooks/use-generate.ts
++++ b/packages/client/src/hooks/use-generate.ts
+@@ -1234,6 +1234,8 @@
+       narrativeDirectorMode?: "natural" | "random";
+       generationGuide?: string;
+       generationGuideSource?: "narrator" | "guide" | "game_start";
++      /** Empty Roleplay Send: inject a prompt-only user turn without persisting it. */
++      roleplayContinue?: boolean;
+       agentInjectionOverrides?: Array<{ agentType: string; agentName?: string; text: string }>;
+       impersonatePresetId?: string;
+       impersonateConnectionId?: string;
+--- a/packages/shared/src/schemas/chat.schema.ts
++++ b/packages/shared/src/schemas/chat.schema.ts
+@@ -53,5 +53,7 @@
+   narrativeDirectorMode: z.enum(["natural", "random"]).nullable().optional().default(null),
+   generationGuide: z.string().nullable().optional().default(null),
+   generationGuideSource: z.enum(["narrator", "guide", "game_start"]).nullable().optional().default(null),
++  /** Empty Roleplay Send: add a prompt-only user continuation turn without saving it. */
++  roleplayContinue: z.boolean().optional().default(false),
+   agentInjectionOverrides: z
+     .array(
+--- a/packages/server/src/routes/generate.routes.ts
++++ b/packages/server/src/routes/generate.routes.ts
+@@ -1463,5 +1463,15 @@
+         mappedMessages.push(await mapChatHistoryMessageForPrompt(message));
+       }
+ 
++      // Empty Send in Roleplay is a prompt-only user turn. It must reach the
++      // model as a normal user message, but must never be persisted or shown.
++      if (chatMode === "roleplay" && input.roleplayContinue) {
++        mappedMessages.push({
++          role: "user",
++          content: "Continue the story.",
++          contextKind: "injection",
++        });
++      }
++
+       // Attach current request's provider inputs to the last user message (they're already saved in extra,
+       // but the message was just created and may be the last in mappedMessages)
