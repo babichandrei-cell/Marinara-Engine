@@ -43,7 +43,16 @@
 
 ### `World-Lorebook/`
 
-- `Alderwick.marinara.json` — лорбук мира Alderwick. Содержит 56 записей.
+- `Alderwick.marinara.json` — лорбук мира Alderwick. Содержит 57 записей, включая реестр возможных повторяющихся NPC Альдервика.
+
+### `World-Maps/`
+
+- `README.md` — назначение карты Alderwick, её связь с лорбуком, совместимость и безопасный порядок импорта.
+- `Alderwick.world-map.json` — подробная импортируемая World Maps-карта Alderwick: 35 локаций, английские описания, маршруты и привязки к актуальным записям Alderwick Lorebook.
+
+### `NPCs/`
+
+- `Alderwick-NPCs-list.txt` — исходный список 39 NPC Альдервика с их публичными ролями и обычными локациями; имена служат только визуальными якорями для консистентности изображений.
 
 ### `Agents/`
 
@@ -61,7 +70,7 @@
 
 ### `FirstMessages/`
 
-- `EleanorMarlowe.txt` — стартовая сцена: Alderwick, 12 июля, 11:32; миссис Элеанор Марлоу обращается в The Pentad Bureau из-за исчезновения дочери Лидии.
+- `001-SalmaHyek-JennaOrtega.txt` — стартовая сцена расследования пропажи в Alderwick: 12 июля, 11:32.
 
 ## `connections/`
 

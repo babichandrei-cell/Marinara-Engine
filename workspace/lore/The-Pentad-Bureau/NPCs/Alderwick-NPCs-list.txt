@@ -1,0 +1,51 @@
+# Alderwick NPC roster
+
+The names are visual anchors for image consistency only. They do not import the
+appearance, personality, biography, relationships, profession or public image of
+any real person. An NPC appears only when the current scene, location or
+investigation establishes their presence.
+
+## Women
+
+- Jennifer Aniston — landlady of The Rusted Anchor; Rookery.
+- Gwyneth Paltrow — maître d' and manager of private dinners at The Gilded Heron; Bellmont.
+- Jodie Foster — senior ward surgeon at Veyne Royal Infirmary; central Alderwick.
+- Margot Robbie — featured singer and stage performer at The Copper Lark Music Hall; Velvet Row.
+- Winona Ryder — conservator of parish records at Saint Orison's Church; Old Alderwick.
+- Keira Knightley — independent carriage proprietor and trusted courier; Bracken Cross.
+- Natalie Portman — dispensing chemist at Bell & Thistle Apothecary; Charter Ward.
+- Scarlett Johansson — theatrical costumer and backstage fixer at The Copper Lark Music Hall; Velvet Row.
+- Charlize Theron — house manager at The Brass Regent Hotel; Bellmont.
+- Kirsten Dunst — florist and stallholder at Veyne Central Market; Rookery.
+- Salma Hayek — licensed river trader and owner of a small cargo launch; Grey Quays.
+- Cate Blanchett — barrister specialising in commercial and inheritance disputes; Charter Ward.
+- Heather Graham — senior telegraph operator at the Central Telegraph & General Post Office; Charter Ward.
+- Jenna Ortega — apprentice precision machinist at a Blackwall engineering works; Blackwall.
+- Uma Thurman — proprietor and fencing instructor at a workers' athletic hall; Rookery.
+- Angelina Jolie — freelance investigative journalist; Black Finch Coffee House, Charter Ward.
+- Nicole Kidman — curator of civic maps and property records; Charter Ward archives.
+- Catherine Zeta-Jone — interpreter and correspondence secretary for visiting merchants; Grey Quays.
+- Tilda Swinton — lecturer in mechanical philosophy and consultant to instrument makers; Charter Ward.
+- Julianne Moore — insurance assessor for cargo and industrial losses; Bellmont.
+- Cameron Diaz — guest-relations concierge at The Brass Regent Hotel; Bellmont.
+
+## Men
+
+- Leonardo DiCaprio — shipping broker and river-insurance intermediary; Grey Quays.
+- Tom Cruise — passenger-rail dispatch superintendent; Bracken Cross.
+- Brad Pitt — scenic painter and set carpenter at The Copper Lark Music Hall; Velvet Row.
+- Johnny Depp — restorer and dealer in mechanical antiques; Old Alderwick.
+- Denzel Washington — senior safety foreman at an iron foundry; Blackwall.
+- Anthony Hopkins — retired magistrate and private legal adviser; Charter Ward.
+- Will Smith — auction caller and produce broker at Veyne Central Market; Rookery.
+- Christian Bale — chief mechanical engineer for dock cranes and freight gear; Deepwater.
+- Jim Carrey — illusionist and maker of novelty mechanical acts; The Copper Lark Music Hall, Velvet Row.
+- Hugh Grant — solicitor handling contracts, wills and discreet introductions; Charter Ward.
+- Jason Statham — river pilot and freight-yard supervisor; Deepwater.
+- Dustin Hoffman — claims examiner for a Bellmont insurer; Bellmont.
+- Keanu Reeves — night telegraph courier; Central Telegraph & General Post Office, Charter Ward.
+- Sylvester Stallone — boxing instructor and proprietor of a modest training room; Rookery.
+- George Clooney — dining-room host and membership liaison at The Meridian Club; Bellmont.
+- Matt Damon — crime and civic-affairs reporter; Black Finch Coffee House, Charter Ward.
+- Jack Nicholson — pawnbroker and dealer in household curiosities; Old Alderwick.
+- Mel Gibson — elected steward for a machinists' mutual-aid society; Blackwall.
