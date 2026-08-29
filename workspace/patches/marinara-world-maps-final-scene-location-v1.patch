@@ -1,0 +1,204 @@
+diff --git a/packages/server/src/routes/generate.routes.ts b/packages/server/src/routes/generate.routes.ts
+index 44614a4e1..56309373e 100644
+--- a/packages/server/src/routes/generate.routes.ts
++++ b/packages/server/src/routes/generate.routes.ts
+@@ -6885,6 +6885,7 @@ export async function generateRoutes(app: FastifyInstance) {
+           let parsedCommandCharacterIds: (string | null)[] | null = null;
+           let parsedRawCommandCount = 0;
+           let assistantSpatialDirective: ReturnType<typeof extractAssistantSpatialDirective>["directive"] = null;
++          let assistantSceneLocationId: string | null = null;
+           let assistantSpatialDirectiveDetected = false;
+           let conversationCommandContent: string | null = null;
+           if (tailMessages.assistantPrefillInjected && assistantPrefill && fullResponse.startsWith(assistantPrefill)) {
+@@ -7174,11 +7175,19 @@ export async function generateRoutes(app: FastifyInstance) {
+ 
+           if (hierarchicalMapsEnabledForChat && (requestChatMode === "roleplay" || requestChatMode === "game")) {
+             const parsedSpatial = extractAssistantSpatialDirective(fullResponse);
+-            assistantSpatialDirectiveDetected = parsedSpatial.directive !== null;
++            assistantSpatialDirectiveDetected = parsedSpatial.directive !== null || parsedSpatial.sceneLocationId !== null;
+             // A queued owner movement is the sole spatial mutation for this turn.
+             // Still strip any package directive from the visible response, but do
+             // not let model output compete with the already accepted route.
+             assistantSpatialDirective = shouldSuppressAssistantSpatialMutation(input) ? null : parsedSpatial.directive;
++            // Empty-send continuation is deliberately model-led: use the location of the
++            // completed focal scene, not merely the last location named in its prose.
++            assistantSceneLocationId =
++              !shouldSuppressAssistantSpatialMutation(input) &&
++              requestChatMode === "roleplay" &&
++              Boolean(input.continueMessageId)
++                ? parsedSpatial.sceneLocationId
++                : null;
+             if (parsedSpatial.matched) {
+               fullResponse = parsedSpatial.cleanContent;
+               contentReplaced = true;
+@@ -7269,6 +7278,7 @@ export async function generateRoutes(app: FastifyInstance) {
+                     regenerate: false,
+                     continuation: false,
+                     directive: assistantSpatialDirective,
++                    sceneLocationId: assistantSceneLocationId,
+                   },
+                   chatMeta,
+                 );
+@@ -7434,6 +7444,7 @@ export async function generateRoutes(app: FastifyInstance) {
+                 regenerate: Boolean(input.regenerateMessageId),
+                 continuation: Boolean(input.continueMessageId),
+                 directive: assistantSpatialDirective,
++                sceneLocationId: assistantSceneLocationId,
+               },
+               chatMeta,
+             );
+diff --git a/packages/server/src/services/capability-packages/package-manager.service.ts b/packages/server/src/services/capability-packages/package-manager.service.ts
+index 7759b3ebd..e8b9604c6 100644
+--- a/packages/server/src/services/capability-packages/package-manager.service.ts
++++ b/packages/server/src/services/capability-packages/package-manager.service.ts
+@@ -28,6 +28,7 @@ import { sidecarSpeechService } from "../sidecar/sidecar-speech.service.js";
+ 
+ const ROOT = join(DATA_DIR, "capability-packages");
+ const VERSIONS = join(ROOT, "versions");
++const LOCAL_IMPORTS = join(ROOT, "local-imports");
+ const REGISTRY = join(ROOT, "installed.json");
+ const UPDATE_DECISIONS = join(ROOT, "update-decisions-v1.json");
+ const AVAILABILITY_MIGRATION = join(ROOT, "availability-migration-v1.json");
+@@ -580,7 +581,11 @@ export function findPendingCapabilityPackageUpdates(
+     }));
+ }
+ 
+-async function installCatalogPackage(entry: CapabilityCatalogPackage, activateDuringStartup = false) {
++async function installCatalogPackage(
++  entry: CapabilityCatalogPackage,
++  activateDuringStartup = false,
++  archiveOverride?: Buffer,
++) {
+   const { manifest, artifact } = entry;
+   const installIssue = getCapabilityPackageInstallIssue(manifest);
+   if (installIssue) throw new Error(installIssue);
+@@ -591,10 +596,12 @@ async function installCatalogPackage(entry: CapabilityCatalogPackage, activateDu
+   if (!supportsEngineVersion(entry, APP_VERSION)) {
+     throw new Error(`Package requires Marinara Engine ${manifest.engine.min} to below ${manifest.engine.maxExclusive}`);
+   }
+-  const archive = await fetchBytes(artifact.url, Math.min(artifact.bytes + 1, MAX_ARTIFACT_BYTES));
+-  if (archive.byteLength !== artifact.bytes) throw new Error("Downloaded package size does not match the catalog");
+-  const digest = createHash("sha256").update(archive).digest("hex");
+-  if (digest !== artifact.sha256) throw new Error("Downloaded package checksum does not match the catalog");
++  const archive = archiveOverride ?? (await fetchBytes(artifact.url, Math.min(artifact.bytes + 1, MAX_ARTIFACT_BYTES)));
++  if (!archiveOverride) {
++    if (archive.byteLength !== artifact.bytes) throw new Error("Downloaded package size does not match the catalog");
++    const digest = createHash("sha256").update(archive).digest("hex");
++    if (digest !== artifact.sha256) throw new Error("Downloaded package checksum does not match the catalog");
++  }
+ 
+   const zip = new AdmZip(archive);
+   const entries = validatePackageArchiveEntries(zip);
+@@ -1145,6 +1152,35 @@ export const capabilityPackageManager = {
+     return installCatalogPackage(entry);
+   },
+ 
++  /** Trusted local-package path. It is deliberately not exposed over HTTP. */
++  async installLocalArtifact(filename: string) {
++    const name = filename.trim();
++    if (!name || name.includes("/") || name.includes("\\") || !name.toLowerCase().endsWith(".zip")) {
++      throw new Error("Local capability artifact filename is invalid");
++    }
++    const archive = await readFile(inside(LOCAL_IMPORTS, join(LOCAL_IMPORTS, name)));
++    if (archive.byteLength > MAX_ARTIFACT_BYTES) throw new Error("Package artifact is too large");
++    const entries = validatePackageArchiveEntries(new AdmZip(archive));
++    const manifestEntry = entries.find((item) => item.entryName === "manifest.json");
++    if (!manifestEntry || manifestEntry.header.size > MAX_MANIFEST_BYTES) {
++      throw new Error("Package manifest is missing or too large");
++    }
++    const manifest = capabilityPackageManifestSchema.parse(JSON.parse(manifestEntry.getData().toString("utf8")));
++    return installCatalogPackage(
++      {
++        category: "misc",
++        manifest,
++        artifact: {
++          url: "https://local.invalid/capability-package.zip",
++          sha256: createHash("sha256").update(archive).digest("hex"),
++          bytes: archive.byteLength,
++        },
++      },
++      false,
++      archive,
++    );
++  },
++
+   async uninstall(packageId: string) {
+     const registry = await readRegistry();
+     const existing = registry.packages.find((item) => item.id === packageId);
+diff --git a/packages/server/src/services/spatial-context/state-resolution.ts b/packages/server/src/services/spatial-context/state-resolution.ts
+index 8b8e454d2..0b1484d62 100644
+--- a/packages/server/src/services/spatial-context/state-resolution.ts
++++ b/packages/server/src/services/spatial-context/state-resolution.ts
+@@ -15,12 +15,18 @@ export type AssistantSpatialDirective =
+ export interface ParsedAssistantSpatialDirective {
+   cleanContent: string;
+   directive: AssistantSpatialDirective | null;
++  /** The known map location that is the final focal scene in a narrated continuation. */
++  sceneLocationId: string | null;
+   matched: boolean;
+ }
+ 
+-const ASSISTANT_SPATIAL_COMMAND_RE = /\[spatial_(move|discover):\s*([^\]\r\n]*)\]/giu;
+-const ASSISTANT_SPATIAL_COMMAND_PREFIXES = ["[spatial_move:", "[spatial_discover:"] as const;
+-const ASSISTANT_SPATIAL_COMMAND_PREFIX_ONLY_RE = /^\[spatial_(?:move|discover):\s*$/iu;
++const ASSISTANT_SPATIAL_COMMAND_RE = /\[spatial_(move|discover|scene_location):\s*([^\]\r\n]*)\]/giu;
++const ASSISTANT_SPATIAL_COMMAND_PREFIXES = [
++  "[spatial_move:",
++  "[spatial_discover:",
++  "[spatial_scene_location:",
++] as const;
++const ASSISTANT_SPATIAL_COMMAND_PREFIX_ONLY_RE = /^\[spatial_(?:move|discover|scene_location):\s*$/iu;
+ 
+ export interface AssistantSpatialDirectiveStreamFilter {
+   push(content: string): string;
+@@ -93,11 +99,17 @@ function parseCommandAttributes(body: string): Map<string, string> {
+ /** Extract the last valid package-owned location command and hide all such commands from chat text. */
+ export function extractAssistantSpatialDirective(content: string): ParsedAssistantSpatialDirective {
+   let directive: AssistantSpatialDirective | null = null;
++  let sceneLocationId: string | null = null;
+   let matched = false;
+   for (const match of content.matchAll(ASSISTANT_SPATIAL_COMMAND_RE)) {
+     matched = true;
+     const command = match[1]?.toLowerCase();
+     const values = parseCommandAttributes(match[2] ?? "");
++    if (command === "scene_location") {
++      const destinationId = (values.get("destination_id") ?? values.get("destination") ?? "").trim().slice(0, 128);
++      if (destinationId) sceneLocationId = destinationId;
++      continue;
++    }
+     if (command === "move") {
+       const destinationId = (values.get("destination_id") ?? values.get("destination") ?? "").trim().slice(0, 128);
+       if (destinationId) directive = { type: "move", destinationId };
+@@ -124,7 +136,7 @@ export function extractAssistantSpatialDirective(content: string): ParsedAssista
+     }
+   }
+   if (!matched) {
+-    return { cleanContent: content, directive: null, matched: false };
++    return { cleanContent: content, directive: null, sceneLocationId: null, matched: false };
+   }
+   return {
+     cleanContent: content
+@@ -132,6 +144,7 @@ export function extractAssistantSpatialDirective(content: string): ParsedAssista
+       .replace(/\n{3,}/gu, "\n\n")
+       .trim(),
+     directive,
++    sceneLocationId,
+     matched: true,
+   };
+ }
+@@ -168,6 +181,7 @@ interface StateResolutionService {
+     regenerate: boolean;
+     continuation: boolean;
+     directive?: AssistantSpatialDirective | null;
++    sceneLocationId?: string | null;
+     locationGuidance?: string | null;
+   }): Promise<SpatialContextSnapshot | null>;
+ }
+@@ -213,6 +227,7 @@ export async function materializeAssistantSpatialState(
+     regenerate: boolean;
+     continuation: boolean;
+     directive?: AssistantSpatialDirective | null;
++    sceneLocationId?: string | null;
+     locationGuidance?: string | null;
+   },
+   chatMetadata: unknown,

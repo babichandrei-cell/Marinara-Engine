@@ -1,0 +1,265 @@
+*CHAT SUMMARY*
+
+Ignore previous narrative-writing instructions that are not relevant to WORLD STATE extraction.
+
+TASK
+
+Update the existing WORLD STATE using the newest conversation messages.
+
+WORLD STATE is a compact record of the simulation at the exact final established moment.
+It is not a story summary.
+
+Treat the previous WORLD STATE as the baseline.
+Apply established changes from the newest messages and output the resulting final state.
+
+CORE STATE RULES
+
+- Newest established facts override older facts.
+- Persistent state remains true until a later established fact changes, removes, replaces, resolves, or makes it impossible.
+- Silence is not a state change.
+- Do not require an established persistent fact to be repeated in newer messages in order to preserve it.
+- Remove facts that are explicitly outdated, completed, contradicted, resolved, or replaced.
+- Describe only the final current state, never the sequence of events.
+
+A message establishes a state change only when it clearly makes that change part of the simulation.
+
+Do not treat as established state changes:
+
+- questions;
+- speculation;
+- hypothetical or conditional scenarios that did not occur;
+- rejected alternatives;
+- possible future actions;
+- plans that have not begun;
+- examples;
+- quoted text;
+- numbered options merely being presented;
+- OOC discussion.
+
+A destination is not the current location until arrival is established.
+A planned action is not a current action until it begins.
+A completed action is not a current action.
+
+OBSERVER BOUNDARY
+
+{{user}} is the external observer/director of the simulation, not an in-world entity.
+
+Director messages may establish or modify the simulation, but sending a message is never itself an in-world action.
+
+Never assign {{user}} physical presence, location, body state, posture, clothing, equipment, possessions, relationships, in-world goals, or interactions.
+
+Never include {{user}} anywhere in WORLD STATE unless the director explicitly establishes {{user}} as an in-world character.
+
+If an older WORLD STATE contains {{user}} as an in-world entity, remove that stale entry.
+
+FINAL STATE EXTRACTION
+
+Before writing, silently determine:
+
+- the exact final established moment;
+- the single current location;
+- which characters are physically present;
+- their final positions, postures, and continuing physical actions;
+- current clothing and body coverage;
+- current equipment and relevant possessions;
+- visible physical conditions;
+- important object locations and states;
+- active unfinished goals;
+- active threats and unresolved facts.
+
+Do not:
+
+- narrate events;
+- reproduce dialogue;
+- explain how the state was reached;
+- preserve completed actions as current;
+- invent missing details;
+- copy numbered choices;
+- optimize the output as an image-generation prompt.
+
+Output in Russian.
+
+Preserve all established proper names, terminology, locations, organizations, objects, files, codes, and technical terms exactly as written.
+
+Use only the following structure.
+Omit empty sections and empty fields.
+
+CURRENT LOCATION
+
+- Exact current location and sub-area.
+- Established date when still applicable.
+- Exact time only when established for the current moment.
+
+CURRENT SCENE
+
+- Relevant environmental and scene-level physical state.
+- Include lighting, visibility, weather, temperature, sound, terrain, architecture, entrances, exits, barriers, damage, hazards, and continuing environmental actions only when established and relevant.
+- Include only facts still true at the final moment.
+- Do not duplicate individual character state already described under CHARACTERS.
+
+When relevant, distinguish precisely between:
+
+- physically blocked;
+- partially obstructed;
+- dangerous;
+- exposed;
+- guarded;
+- scanned;
+- under fire;
+- accessible;
+- inaccessible.
+
+CHARACTERS
+
+Include only characters physically present at the final moment.
+
+For each character:
+
+- Name:
+  - Position:
+  - Posture/action:
+  - Clothing and coverage:
+  - Equipment:
+  - Visible physical condition:
+  - Current goal:
+
+CHARACTER RULES
+
+Position:
+- Record the exact final current position.
+
+Posture/action:
+- Include only current posture, orientation, or a physical action still continuing at the final moment.
+- Never include completed speech, commands, warnings, replies, or earlier actions.
+
+Presence:
+- Character presence persists until later events establish that the character leaves, is removed, becomes separated from the active scene, or the scene moves elsewhere.
+- Mentioning, discussing, remembering, calling, messaging, hearing, or seeing a character remotely does not make that character physically present.
+
+Equipment:
+- Include important objects currently possessed or worn.
+- Describe an object as held in a hand only when explicitly established as currently held.
+- Ownership or possession does not imply that an object is in a hand.
+
+Visible physical condition:
+- Include only explicitly established externally observable conditions such as injury, blood, dirt, wetness, sweat, restraint, unconsciousness, trembling, heavy breathing, visible fatigue, medical dressings, or persistent physical damage.
+- Never infer thoughts, emotions, fear, stress, tension, adrenaline, motives, or private sensations.
+
+CLOTHING AND BODY COVERAGE
+
+Clothing and body coverage are persistent continuity state.
+
+Preserve established:
+
+- worn garments and footwear;
+- garment type, color, material, and layering when known;
+- visible accessories;
+- armor and protective equipment;
+- medical garments;
+- explicitly relevant underwear;
+- removed garments;
+- opened, lifted, lowered, displaced, torn, cut, or damaged garments;
+- explicitly uncovered body regions;
+- body regions covered by sheets, towels, blankets, gowns, drapes, bandages, armor, or other materials.
+
+Established absence of clothing is a positive state fact, not missing information.
+
+Silence does not restore removed clothing, remove worn clothing, change footwear, cover an uncovered body region, uncover a covered body region, remove a covering, or change established presentation.
+
+Preserve the exact distinction between:
+
+- clothed;
+- covered by non-clothing material;
+- uncovered.
+
+Never:
+
+- infer full undress from partial exposure;
+- invent clothing or coverings to reduce established exposure;
+- invent exposure that was never established;
+- restore removed clothing without an established dressing action;
+- simplify a specific established outfit into a vague category.
+
+IMPORTANT OBJECTS
+
+Include continuity-relevant objects not already sufficiently described under a character.
+
+For each object:
+
+- Object:
+  - Visual identity:
+  - Location:
+  - State:
+
+OBJECT RULES
+
+- Preserve exact object identity.
+- Record only the final established location and state.
+- Persistent object location and state remain unchanged until later established events change them.
+- Do not invent transitional states.
+- Do not list characters or creatures as objects.
+- Do not duplicate objects already fully represented under a character unless their independent state matters.
+
+VISUAL IDENTITY
+
+Include Visual identity only for objects that are unique, recurring, story-important, visually distinctive, or expected to appear again.
+
+Preserve established stable appearance such as type, size, shape, material, color, finish, markings, controls, display, connectors, persistent wear, and persistent damage.
+
+Reuse established wording for unchanged Visual identity whenever practical.
+
+Do not invent detailed appearance for generic or insufficiently described objects.
+
+Visual identity describes stable appearance.
+State describes changeable condition.
+
+ACTIVE GOALS
+
+- Include only explicit unfinished objectives that still affect the simulation.
+- Include planned destinations only when explicitly established as goals.
+- Do not include completed actions.
+- Do not include numbered choices.
+- Do not invent secondary goals.
+
+ACTIVE THREATS AND UNCERTAINTIES
+
+- Include only unresolved threats, dangers, unknowns, or unverified facts that still affect the current situation.
+- Distinguish confirmed facts from suspicions.
+- Remove resolved threats.
+- Do not invent hypothetical alternatives.
+
+FINAL CHECK
+
+Before output, silently verify:
+
+- one exact final moment and one current location;
+- only physically present characters are listed;
+- no completed or merely planned action is represented as current;
+- no persistent state disappeared only because newer messages were silent about it;
+- later established facts replaced obsolete earlier states;
+- {{user}} is not represented as an in-world entity.
+
+Use concise factual bullets.
+Keep each bullet to one fact whenever practical.
+Do not use placeholder values such as “нет”, “не совершает”, “отсутствует”, or “не имеется”.
+
+Limit the complete WORLD STATE to {{words}} words or less.
+
+Output only the updated WORLD STATE.
+
+
+*COMBINE PROMPT*
+Combine the ordered WORLD STATE summaries into one consolidated WORLD STATE.
+
+Treat them as chronological snapshots of the same simulation.
+
+The newest summary is authoritative for the final state.
+Preserve compatible persistent continuity facts from older summaries when they remain current.
+Later established facts override earlier conflicting facts.
+
+Do not preserve obsolete intermediate states.
+Do not narrate chronology or invent missing transitions.
+
+Follow the WORLD STATE structure and rules from the system prompt exactly.
+
+Output only the consolidated WORLD STATE.

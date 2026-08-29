@@ -1,87 +1,111 @@
-Track the final current visual state of the scene after the latest assistant message.
+Create an image-generation prompt for the final current roleplay scene.
 
-Current fields live in <current_game_state> under playerStats.customTrackerFields as { name, value, locked? }.
+Use the latest chronologically depicted moment consistent with the final tracker states.
 
-Respond ONLY with valid JSON.
+Sources:
 
-Expected fields may include:
-* Scene Style
-* Setting
-* Environment
-* Spatial Layout
-* Lighting
-* Atmosphere
-* Visible Objects
+{{agent::world-state}}
+= current time, broader location, weather, temperature.
 
-General rules:
+{{agent::custom-tracker}}
+= final environment state.
 
-1. Output ALL existing fields. Do not add, rename, reorder, or remove fields. Copy locked fields exactly.
-2. Values are always strings.
-3. Represent the latest chronologically established visual state.
-4. Preserve previous values and wording unless the latest narrative changes them.
-5. When the scene moves elsewhere, replace scene-specific state from the previous setting.
-6. Use active lore as context for established world and setting properties, but not as evidence that a specific movable object, temporary arrangement, or spatial relationship is currently present.
-7. Prefer current narrative and prior tracker state for what is actually present now.
-8. Track only visually representable information. Do not include sounds, smells, thoughts, emotions, or other non-visual information.
-9. Prefer an empty string over unsupported inference.
+{{agent::character-tracker}}
+= final character state.
 
-Field rules:
+Only include characters listed in Character Tracker presentCharacters.
 
-Scene Style
-- Store a concise visual grammar of the established scene or world aesthetic.
-- Prefer concrete cues such as period/culture, architecture, materials, furnishing language, technology, construction, and fashion context over unexplained genre, world, faction, or setting labels.
-- A proper noun or style label may remain, but must not carry visual meaning by itself.
-- Do not invent stereotypical motifs to explain a style.
-- Preserve the style until the established visual language materially changes.
-
-Setting
-- Store the specific immediate place where the scene occurs.
-- Preserve it until the scene moves elsewhere.
-
-Environment
-- Store persistent visible features that define the place: architecture, major furniture, dominant materials, machinery, built-in systems, and important background features.
-- Include only features whose visible presence is established.
-- Do not convert abstract style information into specific objects, mechanisms, or decorations.
-- Do not inventory ordinary clutter.
-
-Spatial Layout
-- Store only established positional relationships between stable scene features, such as "desk beneath the windows" or "door opposite the fireplace".
-- Do not use camera-relative positions or temporary character positions.
-- Merely being "in the room", "inside", or "nearby" is not a spatial relationship.
-- If no meaningful relationship is established, use an empty string.
-
-Lighting
-- Store the established current illumination.
-- Preserve it until it changes.
-- Do not invent stylistically appropriate lighting. If none is established, use an empty string.
-
-Atmosphere
-- Store only visible ambient conditions such as mist, smoke, haze, steam, dust, rain, snow, heat shimmer, or clear air.
-- Do not store emotional mood or other non-visual atmosphere.
-- If none is established, use an empty string.
-
-Visible Objects
-- Store only significant movable or stateful objects whose presence, placement, or condition matters for continuity.
-- Format:
-  Object — state/location; Object — state/location
-- Prefer locations relative to stable scene anchors when established.
-- Do not repeat ordinary background features already covered by Environment.
-- Do not include an object currently represented as carried by a present character in Character Tracker.
-- When an object moves between the environment and a character, update its authoritative location rather than duplicating it.
-
-Keep the fields distinct:
-Environment = what defines the place.
-Spatial Layout = where stable features are relative to one another.
-Visible Objects = significant movable/stateful objects in the environment.
-
-Schema:
+Return ONLY valid JSON:
 
 {
-  "fields": [
-    {
-      "name": "string — exact existing field name",
-      "value": "string — current value"
-    }
-  ],
-  "reasoning": "string — brief explanation of what changed and why"
+  "shouldGenerate": boolean,
+  "reason": "brief explanation",
+  "prompt": "image generation prompt",
+  "characters": ["visible character names"]
 }
+
+## Source priority
+
+1. Final tracker state overrides earlier narrative state for persistent scene and character facts.
+2. Use the latest assistant response for current action, pose, gaze, temporary position, object interaction, and composition when it does not conflict with tracker state.
+3. Do not reconstruct an earlier state.
+
+## General
+
+- Describe only the final visible scene.
+- The image prompt must be self-contained. The image model has no access to lore, trackers, character cards, or conversation history.
+- Convert relevant setting/style information into concrete visible features.
+- Proper nouns and genre/style labels are not sufficient visual descriptions by themselves.
+- Do not invent unsupported architecture, objects, mechanisms, clothing, accessories, equipment, characters, lighting, or atmospheric effects.
+- Style may refine the appearance of established elements but must not create or replace them.
+
+## Environment
+
+Use Custom Tracker as authoritative for:
+
+- Scene Style
+- Setting
+- Environment
+- Spatial Layout
+- Lighting
+- Atmosphere
+- Visible Objects
+
+Rules:
+
+- Environment contains established architecture, furnishings, materials, machinery, built-in systems, and background features.
+- Spatial Layout contains only established positional relationships. If none are established, do not invent room geometry.
+- Lighting is authoritative. If empty, do not invent a specific light source or dramatic lighting.
+- Atmosphere is authoritative. If empty, do not add haze, fog, smoke, steam, dust, rain, snow, or other atmospheric effects.
+- Visible Objects must keep their established state and location.
+- Ordinary furnishings already established by Environment may appear.
+
+## Characters
+
+For every visible character include:
+
+- exactly the full character name;
+- established physical appearance;
+- complete current outfit;
+- visible accessories or carried/held items contained in the outfit state;
+- current pose and action.
+
+Character Tracker `outfit` is authoritative for current clothing and wearable visual state.
+
+Preserve all established outfit details that are visually relevant, including when present:
+
+- garment type;
+- color;
+- material;
+- cut, fit, silhouette, and length;
+- coverage and meaningful exposed areas;
+- open, unfastened, removed, damaged, or altered state;
+- legwear;
+- footwear;
+- visible accessories;
+- held or carried items;
+- explicitly established absence of relevant clothing layers.
+
+Do not replace detailed outfit information with generic phrases such as "steampunk outfit", "formal clothing", or "professional attire".
+
+Do not infer missing clothing details from genre, gender, profession, status, weather, location, or personality.
+
+Scene Style may visually refine an established garment, but must not change its garment type, color, material, length, coverage, or state.
+
+## Continuity
+
+- Do not include characters absent from Character Tracker.
+- Do not duplicate a portable object as both carried by a character and present in the environment.
+- Respect established stable spatial relationships.
+- Infer temporary character position only when required by the latest visible action.
+- If the latest assistant response conflicts with the final tracker state for clothing, carried items, environment, lighting, atmosphere, or object location, use the final tracker state.
+
+## Output content
+
+Do not include thoughts, dialogue, scents, sounds, invisible emotions, or non-visible lore in the image prompt.
+
+Create a naturalistic, visually coherent composition.
+
+The image MUST use cinematic realism.
+
+Keep the image prompt concise while preserving all important established visual state.
