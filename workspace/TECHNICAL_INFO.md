@@ -12,7 +12,7 @@
 | Удалённый репозиторий `origin` | `git@github.com:babichandrei-cell/Marinara-Engine.git` |
 | Вышестоящий репозиторий `upstream` | `git@github.com:Pasta-Devs/Marinara-Engine.git` |
 | Ветка развёртывания | `staging` |
-| Текущий commit | `9535709bb` |
+| Текущий commit | `9535709bb`; в рабочем дереве сервера также применены незакоммиченные доработки World Maps, оба патча последовательности Storyboard и патч planner output budget 4096. |
 | Версия | `v2.4.4-6-g9535709bb` — шесть коммитов после тега `v2.4.4` |
 
 ## Сервер и доступ
@@ -21,7 +21,7 @@
 | --- | --- |
 | Имя сервера | `comfy-server` |
 | Каталог проекта | `/srv/marinara/Marinara-Engine` |
-| SSH-доступ | Используются профили `comfy-local` и `comfy-remote` из SSH-конфигурации. |
+| SSH-доступ | Прямой доступ ассистента к серверу отсутствует. Диагностические команды и действия на сервере выполняет пользователь; ассистент даёт точные команды и анализирует присланный вывод. |
 | Доступ из локальной сети | `http://192.168.1.27:7860` |
 | Доступ извне | Через туннель: `http://10.20.0.1:7860` |
 | Публикация контейнера | `0.0.0.0:7860 → 7860/tcp` |
@@ -54,6 +54,13 @@
 | Основная модель | `Gemma-4-The-Deckards-Brain-31B-NVFP4` |
 | Embedding-модель | `BGE-M3-Q8` |
 | OpenAI-совместимый endpoint из контейнера | `http://host.docker.internal:8081/v1` |
+
+### Roleplay Storyboard planner
+
+- Planner отправляет JSON-план keyframes через Deckards Brain 31B.
+- `patches/marinara-storyboard-planner-output-budget-v1.patch` применён 30 августа 2026 года: лимит output tokens повышен с 2200/3600 до 4096.
+- При неполном JSON после достижения лимита интерфейс теперь сообщает реальную причину вместо ложного `Storyboard Illustrator returned no usable keyframes`; fallback сохраняется как безопасное поведение.
+- После пересборки `marinara-engine-local` сервер стартовал штатно; первые три хода Storyboard после установки прошли без fallback.
 
 ### Генерация изображений
 
@@ -91,6 +98,10 @@
 
 Все команды ниже выполняются на сервере из `/srv/marinara/Marinara-Engine`.
 
+> **Порядок взаимодействия:** ассистент не пытается подключаться к серверу по SSH и не выполняет на нём команды самостоятельно. Для любой проверки, патча, перезапуска или отката он сначала даёт пользователю команды; пользователь выполняет их и передаёт безопасный вывод. Не включай в этот вывод секреты или содержимое `.env`.
+
+> **Владение данными capability-пакетов:** основной процесс Marinara в контейнере работает от пользователя `node`. Команды, которые устанавливают или изменяют локальный capability-пакет в `/app/data/capability-packages`, выполняй через `docker compose exec --user node marinara …`; иначе файл реестра `installed.json` может оказаться недоступным основному процессу.
+
 ```bash
 # Состояние приложения
 docker compose ps
@@ -112,4 +123,8 @@ git rev-parse --short HEAD
 - [Описание содержимого рабочей папки](CONTENTS.md).
 - `connections/Deckards_Brain_31B.connection.json` — экспорт подключения текстовой модели и embeddings.
 - `connections/ComfyUI_Krea2.connection.json` — экспорт подключения и workflow ComfyUI.
-- `patches/` — два актуальных патча, используемых с текущим развёртыванием.
+- `patches/` — актуальные серверные патчи. Для Roleplay Storyboard подготовлен дополнительный серверный барьер `marinara-roleplay-storyboard-wait-for-trackers-v1.patch`: он ждёт сохранения tracker state перед автоматической раскадровкой. World Maps используют `marinara-world-maps-final-scene-location-v1.patch` и capability-архив `hierarchical-maps-1.4.3-alderwick.1.zip`; порядок применения и проверки — в `PATCHES.md`.
+
+### Установленные capability-пакеты
+
+- **World Maps:** `hierarchical-maps@1.4.3-alderwick.1`, активен и прошёл readiness-проверку 28 августа 2026 года. Это локальная доработка штатной версии 1.4.2 для определения финальной локации при пустом roleplay-автопродолжении.

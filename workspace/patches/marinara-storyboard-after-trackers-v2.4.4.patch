@@ -1,0 +1,133 @@
+diff --git a/packages/server/src/services/agents/agent-pipeline.ts b/packages/server/src/services/agents/agent-pipeline.ts
+index 138749f..d76563d 100644
+--- a/packages/server/src/services/agents/agent-pipeline.ts
++++ b/packages/server/src/services/agents/agent-pipeline.ts
+@@ -68,7 +68,8 @@ interface AgentGroup {
+ 
+ export const AGENT_PHASE_MAX_CONCURRENT_GROUPS = 8;
+ const AGENT_GROUP_MAX_CONCURRENT_TOOL_CALLS = 4;
+-const ILLUSTRATOR_CURRENT_TURN_AGENT_TYPES = new Set(["world-state", "custom-tracker", "character-tracker"]);
++const CURRENT_TURN_TRACKER_AGENT_TYPES = new Set(["world-state", "custom-tracker", "character-tracker"]);
++const CURRENT_TURN_VISUAL_AGENT_TYPES = new Set(["illustrator", "storyboard"]);
+ 
+ export function normalizeAgentMaxParallelJobs(value: unknown): number {
+   const numeric = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+@@ -450,23 +451,23 @@ export interface AgentPipelineResult {
+   allResults: AgentResult[];
+ }
+ 
+-function collectIllustratorCurrentTurnAgentResults(results: AgentResult[]): Record<string, unknown> | null {
++function collectCurrentTurnTrackerResults(results: AgentResult[]): Record<string, unknown> | null {
+   const currentTurnResults: Record<string, unknown> = {};
+   for (const result of results) {
+-    if (!result.success || result.data == null || !ILLUSTRATOR_CURRENT_TURN_AGENT_TYPES.has(result.agentType)) continue;
++    if (!result.success || result.data == null || !CURRENT_TURN_TRACKER_AGENT_TYPES.has(result.agentType)) continue;
+     currentTurnResults[result.agentType] = result.data;
+   }
+   if (Object.keys(currentTurnResults).length === 0) return null;
+ 
+   return {
+     instruction:
+-      "These tracker results were produced for the assistant response being illustrated. They are newer than saved agent outputs and persisted game-state context; use them as the authoritative current-turn world, scene, character, appearance, and outfit state wherever they apply.",
++      "These tracker results were produced for the assistant response being visualized. They are newer than saved agent outputs and persisted game-state context; use them as the authoritative current-turn world, scene, character, appearance, and outfit state wherever they apply.",
+     results: currentTurnResults,
+   };
+ }
+ 
+-function withIllustratorCurrentTurnAgentResults(context: AgentContext, results: AgentResult[]): AgentContext {
+-  const overlay = collectIllustratorCurrentTurnAgentResults(results);
++function withCurrentTurnTrackerResults(context: AgentContext, results: AgentResult[]): AgentContext {
++  const overlay = collectCurrentTurnTrackerResults(results);
+   if (!overlay) return context;
+ 
+   const existingAgentResults = context.memory._agentResults;
+@@ -563,28 +564,28 @@ export function createAgentPipeline(
+         : fullContext;
+       const postProcessingAgents = agents.filter((agent) => agent.phase === "post_processing");
+       const trackerAgents = postProcessingAgents.filter((agent) =>
+-        ILLUSTRATOR_CURRENT_TURN_AGENT_TYPES.has(agent.type),
++        CURRENT_TURN_TRACKER_AGENT_TYPES.has(agent.type),
+       );
+-      const illustratorAgents = postProcessingAgents.filter((agent) => agent.type === "illustrator");
++      const visualAgents = postProcessingAgents.filter((agent) => CURRENT_TURN_VISUAL_AGENT_TYPES.has(agent.type));
+ 
+-      // The Illustrator must see state produced in this turn, rather than the
+-      // prior saved state. Keep independent post-processing agents concurrent.
+-      if (trackerAgents.length > 0 && illustratorAgents.length > 0) {
++      // Illustrator and Storyboard must see state produced in this turn, rather
++      // than the prior saved state. Keep independent post-processing agents concurrent.
++      if (trackerAgents.length > 0 && visualAgents.length > 0) {
+         const otherAgents = postProcessingAgents.filter(
+-          (agent) => agent.type !== "illustrator" && !ILLUSTRATOR_CURRENT_TURN_AGENT_TYPES.has(agent.type),
++          (agent) => !CURRENT_TURN_VISUAL_AGENT_TYPES.has(agent.type) && !CURRENT_TURN_TRACKER_AGENT_TYPES.has(agent.type),
+         );
+         const [trackerResults, otherResults] = await Promise.all([
+           runPostProcessingAgents(trackerAgents, preparedContext, wrappedOnResult, resolveAgentContext),
+           runPostProcessingAgents(otherAgents, preparedContext, wrappedOnResult, resolveAgentContext),
+         ]);
+-        const illustratorContext = withIllustratorCurrentTurnAgentResults(preparedContext, allResults);
+-        const illustratorResults = await runPostProcessingAgents(
+-          illustratorAgents,
+-          illustratorContext,
++        const visualContext = withCurrentTurnTrackerResults(preparedContext, allResults);
++        const visualResults = await runPostProcessingAgents(
++          visualAgents,
++          visualContext,
+           wrappedOnResult,
+           resolveAgentContext,
+         );
+-        return [...trackerResults, ...otherResults, ...illustratorResults];
++        return [...trackerResults, ...otherResults, ...visualResults];
+       }
+ 
+       return runPostProcessingAgents(postProcessingAgents, preparedContext, wrappedOnResult, resolveAgentContext);
+diff --git a/scripts/regressions/agent-runtime.regression.ts b/scripts/regressions/agent-runtime.regression.ts
+index 8131adf..e91b403 100644
+--- a/scripts/regressions/agent-runtime.regression.ts
++++ b/scripts/regressions/agent-runtime.regression.ts
+@@ -635,6 +635,45 @@ assert.equal(
+   "Max Parallel Agent Jobs must also serialize isolated configs inside one batch group",
+ );
+ 
++const visualAgentContexts = new Map<string, AgentContext>();
++const currentTurnVisualAgents = [
++  makeAgent("world-state"),
++  makeAgent("custom-tracker"),
++  makeAgent("character-tracker"),
++  makeAgent("illustrator"),
++  makeAgent("storyboard"),
++];
++await createAgentPipeline(
++  currentTurnVisualAgents,
++  context,
++  undefined,
++  (agent, agentContext) => {
++    if (agent.type === "illustrator" || agent.type === "storyboard") {
++      visualAgentContexts.set(agent.type, agentContext);
++    }
++    return agentContext;
++  },
++).postGenerate("Trackers must update the current turn before visual agents run.");
++
++for (const visualAgentType of ["illustrator", "storyboard"]) {
++  const agentResults = visualAgentContexts.get(visualAgentType)?.memory._agentResults as
++    | Record<string, unknown>
++    | undefined;
++  const currentTurnUpdates = agentResults?.currentTurnTrackerUpdates as
++    | { instruction?: unknown; results?: Record<string, unknown> }
++    | undefined;
++  assert.equal(
++    typeof currentTurnUpdates?.instruction,
++    "string",
++    `${visualAgentType} must receive a current-turn tracker precedence instruction`,
++  );
++  assert.deepEqual(
++    Object.keys(currentTurnUpdates?.results ?? {}).sort(),
++    ["character-tracker", "custom-tracker", "world-state"],
++    `${visualAgentType} must receive all successful tracker results from this turn`,
++  );
++}
++
+ const parallelLlamaArgs = buildLlamaArgs({
+   modelPath: "/tmp/model.gguf",
+   gpuLayers: 0,

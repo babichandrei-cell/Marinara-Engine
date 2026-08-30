@@ -1,0 +1,46 @@
+diff --git a/packages/server/src/routes/game.routes.ts b/packages/server/src/routes/game.routes.ts
+index 66c369c..450aec7 100644
+--- a/packages/server/src/routes/game.routes.ts
++++ b/packages/server/src/routes/game.routes.ts
+@@ -3277,6 +3277,7 @@ const GAME_ASSET_GENERATION_TIMEOUT_MS = 45 * 60 * 1000;
+ const GAME_SCENE_VIDEO_GENERATION_TIMEOUT_MS = 31 * 60 * 1000;
+ const GAME_ILLUSTRATION_SUMMARY_TIMEOUT_MS = 60 * 1000;
+ const GAME_STORYBOARD_ILLUSTRATOR_TIMEOUT_MS = 3 * 60 * 1000;
++const GAME_STORYBOARD_ILLUSTRATOR_MAX_TOKENS = 4096;
+ const GAME_STORYBOARD_ANIMATION_REFINEMENT_TIMEOUT_MS = 60 * 1000;
+ const GAME_ASSET_PORTRAIT_CONCURRENCY = 2;
+ const GAME_ASSET_REFERENCE_LOOKUP_CONCURRENCY = 4;
+@@ -12244,7 +12245,7 @@ export async function gameRoutes(app: FastifyInstance) {
+               conn.model ?? "",
+               {
+                 stream: false,
+-                maxTokens: structuredCharacterPrompts ? 3600 : 2200,
++                maxTokens: GAME_STORYBOARD_ILLUSTRATOR_MAX_TOKENS,
+                 responseFormat: { type: "json_object" },
+                 signal: storyboardAbortSignal,
+               },
+@@ -12257,8 +12258,23 @@ export async function gameRoutes(app: FastifyInstance) {
+           const extraction = extractLeadingThinkingBlocks(directorResult.content || "", parameters?.customThinkingTags);
+           const rawPlan = extraction.content.trim();
+           if (debugLogsEnabled) debugLog("[debug/game/storyboard-illustrator] raw response:\n%s", rawPlan);
+-          const parsedPlan = parseJSON(rawPlan);
++          let parsedPlan: unknown;
++          try {
++            parsedPlan = parseJSON(rawPlan);
++          } catch (err) {
++            if (isLikelyTruncatedJsonResponse(rawPlan, directorResult.finishReason)) {
++              throw new Error(
++                `Storyboard Illustrator reached its ${GAME_STORYBOARD_ILLUSTRATOR_MAX_TOKENS}-token output limit before returning a complete JSON plan. Reduce the requested keyframes or increase the planner output budget.`,
++              );
++            }
++            throw err;
++          }
+           if (!storyboardPlanHasRenderableKeyframe(parsedPlan)) {
++            if (isLikelyTruncatedJsonResponse(rawPlan, directorResult.finishReason)) {
++              throw new Error(
++                `Storyboard Illustrator reached its ${GAME_STORYBOARD_ILLUSTRATOR_MAX_TOKENS}-token output limit before returning a usable JSON plan. Reduce the requested keyframes or increase the planner output budget.`,
++              );
++            }
+             throw new Error("Storyboard Illustrator returned no usable keyframes");
+           }
+           plan = sanitizeStoryboardPlan(parsedPlan, storyboardPlanSanitizerOptions);

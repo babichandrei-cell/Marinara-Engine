@@ -1,0 +1,186 @@
+diff --git a/packages/server/src/routes/game.routes.ts b/packages/server/src/routes/game.routes.ts
+index 66c369c..eaecb31 100644
+--- a/packages/server/src/routes/game.routes.ts
++++ b/packages/server/src/routes/game.routes.ts
+@@ -199,6 +199,10 @@ import {
+   resolveStoredModelContextLimit,
+   type ModelAccessPolicy,
+ } from "../services/generation/model-access-policy.js";
++import {
++  isTurnPostProcessingPending,
++  waitForTurnPostProcessing,
++} from "../services/generation/turn-post-processing-barrier.js";
+ import { postToDiscordWebhook } from "../services/discord-webhook.js";
+ import {
+   getChatGenerationTimeoutMs,
+@@ -11899,10 +11903,7 @@ export async function gameRoutes(app: FastifyInstance) {
+       GAME_SCENE_VIDEO_GENERATION_TIMEOUT_MS,
+       "Game storyboard generation",
+     );
+-    let releaseStoryboardLock: (() => void) | null = await acquireGameAssetGenerationLock(
+-      `storyboard:${input.chatId}`,
+-      storyboardAbortSignal,
+-    );
++    let releaseStoryboardLock: (() => void) | null = null;
+     const storyboardStartedAt = Date.now();
+     try {
+       const requestDebug = input.debugMode === true;
+@@ -11927,6 +11928,23 @@ export async function gameRoutes(app: FastifyInstance) {
+         return reply.status(400).send({ error: "Storyboards are available only in Game and Roleplay chats." });
+       }
+ 
++      // Roleplay Storyboard is requested by the client as soon as the assistant
++      // message appears. That happens before tracker post-processing has saved
++      // this turn's state, so an automatic run must wait on the server-side
++      // completion barrier rather than on a UI timing signal.
++      if (input.automatic && ownerMode === "roleplay") {
++        const wasPostProcessingPending = isTurnPostProcessingPending(input.chatId);
++        if (wasPostProcessingPending) {
++          logger.info("[game/storyboard] Waiting for Roleplay tracker persistence in chat %s", input.chatId);
++        }
++        await waitForTurnPostProcessing(input.chatId, storyboardAbortSignal);
++        if (wasPostProcessingPending) {
++          logger.info("[game/storyboard] Roleplay tracker persistence completed for chat %s", input.chatId);
++        }
++      }
++
++      releaseStoryboardLock = await acquireGameAssetGenerationLock(`storyboard:${input.chatId}`, storyboardAbortSignal);
++
+       const message = await chats.getMessage(input.messageId);
+       if (!message || message.chatId !== input.chatId) {
+         return reply
+diff --git a/packages/server/src/routes/generate.routes.ts b/packages/server/src/routes/generate.routes.ts
+index 44614a4..1cff11e 100644
+--- a/packages/server/src/routes/generate.routes.ts
++++ b/packages/server/src/routes/generate.routes.ts
+@@ -370,6 +370,7 @@ import {
+ import { registerDryRunRoute } from "./generate/dry-run-route.js";
+ import { registerRawRoute } from "./generate/raw-route.js";
+ import { registerRetryAgentsRoute, type ActiveAgentRun } from "./generate/retry-agents-route.js";
++import { beginTurnPostProcessing } from "../services/generation/turn-post-processing-barrier.js";
+ import { fingerprintChatSummary } from "../services/prompt/chat-summary-fingerprint.js";
+ import { isSseReplyWritable, sendSseEvent, startSseKeepalive, startSseReply } from "./generate/sse.js";
+ import {
+@@ -1308,6 +1309,11 @@ export async function generateRoutes(app: FastifyInstance) {
+       sendSseEvent(reply, { type: "progress", data: { phase } });
+     };
+ 
++    // The assistant message becomes visible before post-processing agents finish.
++    // Keep a separate barrier so automatic visual follow-ups can wait for the
++    // tracker writes that describe this exact turn.
++    const releaseTurnPostProcessing = beginTurnPostProcessing(input.chatId);
++
+     try {
+       // ── Turn-game bot seats (UNO, etc.): drive the active game's bot players and
+       //    short-circuit the normal conversation pipeline. Gated by an explicit
+@@ -10599,6 +10605,7 @@ export async function generateRoutes(app: FastifyInstance) {
+       // still arrive without holding the chat's generation lock hostage.
+       sendSseEvent(reply, { type: "done", data: "" });
+       releaseActiveGeneration();
++      releaseTurnPostProcessing();
+ 
+       // Start the independent scene-background tail after tracker persistence,
+       // then keep the SSE stream open for both visual jobs.
+@@ -10631,6 +10638,7 @@ export async function generateRoutes(app: FastifyInstance) {
+       reply.raw.off("close", onClose);
+       releaseActiveGeneration();
+       releaseActiveAgentRun();
++      releaseTurnPostProcessing();
+       if (!clientDisconnected && isSseReplyWritable(reply)) {
+         reply.raw.end();
+       }
+diff --git a/packages/server/src/services/generation/turn-post-processing-barrier.ts b/packages/server/src/services/generation/turn-post-processing-barrier.ts
+new file mode 100644
+index 0000000..75dd609
+--- /dev/null
++++ b/packages/server/src/services/generation/turn-post-processing-barrier.ts
+@@ -0,0 +1,51 @@
++const pendingTurnPostProcessing = new Map<string, symbol>();
++
++/**
++ * Marks a generation as still applying its authoritative post-processing
++ * results. Consumers that derive media from the completed turn can use this
++ * barrier instead of treating the assistant-message SSE event as completion.
++ */
++export function beginTurnPostProcessing(chatId: string): () => void {
++  const token = Symbol(chatId);
++  pendingTurnPostProcessing.set(chatId, token);
++
++  return () => {
++    if (pendingTurnPostProcessing.get(chatId) === token) {
++      pendingTurnPostProcessing.delete(chatId);
++    }
++  };
++}
++
++export function isTurnPostProcessingPending(chatId: string): boolean {
++  return pendingTurnPostProcessing.has(chatId);
++}
++
++function waitForTurnPostProcessingPoll(signal: AbortSignal, pollIntervalMs: number): Promise<void> {
++  if (signal.aborted) {
++    return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error("Turn post-processing cancelled"));
++  }
++
++  return new Promise((resolve, reject) => {
++    const timer = setTimeout(() => {
++      signal.removeEventListener("abort", onAbort);
++      resolve();
++    }, pollIntervalMs);
++    const onAbort = () => {
++      clearTimeout(timer);
++      signal.removeEventListener("abort", onAbort);
++      reject(signal.reason instanceof Error ? signal.reason : new Error("Turn post-processing cancelled"));
++    };
++    signal.addEventListener("abort", onAbort, { once: true });
++  });
++}
++
++/** Waits until tracker and other post-processing writes for this chat are durable. */
++export async function waitForTurnPostProcessing(
++  chatId: string,
++  signal: AbortSignal,
++  pollIntervalMs = 100,
++): Promise<void> {
++  while (isTurnPostProcessingPending(chatId)) {
++    await waitForTurnPostProcessingPoll(signal, pollIntervalMs);
++  }
++}
+diff --git a/scripts/regressions/turn-post-processing-barrier.regression.ts b/scripts/regressions/turn-post-processing-barrier.regression.ts
+new file mode 100644
+index 0000000..3f511e7
+--- /dev/null
++++ b/scripts/regressions/turn-post-processing-barrier.regression.ts
+@@ -0,0 +1,32 @@
++import assert from "node:assert/strict";
++import {
++  beginTurnPostProcessing,
++  isTurnPostProcessingPending,
++  waitForTurnPostProcessing,
++} from "../../packages/server/src/services/generation/turn-post-processing-barrier.js";
++
++const chatId = "turn-post-processing-barrier-regression";
++const releaseFirstTurn = beginTurnPostProcessing(chatId);
++assert.equal(isTurnPostProcessingPending(chatId), true, "a running turn must hold the storyboard barrier");
++
++const waitForFirstTurn = waitForTurnPostProcessing(chatId, new AbortController().signal, 1);
++let firstWaitFinished = false;
++void waitForFirstTurn.then(() => {
++  firstWaitFinished = true;
++});
++await new Promise((resolve) => setTimeout(resolve, 5));
++assert.equal(firstWaitFinished, false, "Storyboard must not start while tracker persistence is pending");
++releaseFirstTurn();
++await waitForFirstTurn;
++assert.equal(isTurnPostProcessingPending(chatId), false, "releasing the turn must unblock Storyboard");
++
++const releaseOlderTurn = beginTurnPostProcessing(chatId);
++const releaseNewerTurn = beginTurnPostProcessing(chatId);
++releaseOlderTurn();
++assert.equal(
++  isTurnPostProcessingPending(chatId),
++  true,
++  "an older generation must not clear a newer turn's completion barrier",
++);
++releaseNewerTurn();
++assert.equal(isTurnPostProcessingPending(chatId), false);
