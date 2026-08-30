@@ -15,12 +15,65 @@
 
 ## Актуальные патчи
 
-| Файл | Назначение | Состояние на `9535709bb` |
+| Файл | Назначение | Состояние |
 | --- | --- | --- |
 | `patches/marinara-empty-send-continue-v8.patch` | Поведение пустой отправки/продолжения сообщения. | Уже присутствует в `staging`: обратная проверка патча проходит. Не применять повторно. |
 | `patches/capability-api-1.14-current.patch` | Доработки Capability API 1.14; затрагивает 20 файлов. | Целиком не накладывается чисто на `9535709bb` из-за последующих изменений ветки. Использовать как документированную разницу и переносить нужные фрагменты после ревизии. |
+| `patches/marinara-storyboard-after-trackers-v2.4.4.patch` | Распространяет текущую последовательность Illustrator на Storyboard. | Его изменение уже обнаружено в незакоммиченном рабочем дереве сервера; повторно не применять. |
+| `patches/marinara-roleplay-storyboard-wait-for-trackers-v1.patch` | Не даёт автоматическому Roleplay Storyboard начать планирование до сохранения трекеров текущего хода. | Применён и пересобран на сервере 30 августа 2026 года; проверен реальным roleplay-ходом. Не применять повторно. |
+| `patches/marinara-storyboard-planner-output-budget-v1.patch` | Увеличивает output budget Roleplay Storyboard planner до 4096 и явно сообщает об обрезанном JSON. | Применён и пересобран на сервере 30 августа 2026 года; контейнер запустился без ошибок, первые три Storyboard-хода прошли штатно. |
+| `patches/marinara-world-maps-final-scene-location-v1.patch` | Для roleplay-автопродолжения фиксирует в World Maps финальную сценическую локацию ответа модели; добавляет безопасную локальную установку capability-архива. | Применён к серверу на базе `9535709bb` 28 августа 2026 года. Активен пакет `hierarchical-maps@1.4.3-alderwick.1`; его readiness — `ready`. Не применять повторно. |
 
 **Вывод:** эти файлы не являются автоматическим рецептом развёртывания текущего сервера. Они сохраняют историю и состав локальных доработок. Перед применением нужен анализ конкретного commit и целевых файлов.
+
+## Output budget Roleplay Storyboard planner
+
+`marinara-storyboard-planner-output-budget-v1.patch` создан после наблюдения живого llama.cpp-лога: запрос планировщика с prompt примерно 873 токена сгенерировал ровно 2200 токенов и вернулся с незавершённым JSON. Parser нашёл вложенный объект первого keyframe и маршрут ошибочно сообщал `Storyboard Illustrator returned no usable keyframes`, после чего включал narration-based fallback.
+
+Патч изменяет только `packages/server/src/routes/game.routes.ts`:
+
+- заменяет разные лимиты `2200`/`3600` единым именованным лимитом `4096`;
+- при неполном JSON или `finishReason: length` до появления usable keyframe выдаёт сообщение о достижении output-token limit и предлагает уменьшить число keyframes либо увеличить budget;
+- валидный JSON, обычные parser-ошибки и fallback-поведение не меняются.
+
+База — чистый `origin/staging` commit `731b195358b6fefc705cfdebfb103fc6c370ec69`. Проверены `git diff --check`, обратная проверка патча в изменённом checkout и TypeScript shared/server; SHA-256: `0bed3d8bca2b24b036459cf3ead24b6a4efa82174e435a39813d92144278f4cf`. Патч также чисто наложился поверх фактического серверного `9535709bb` с локальными доработками, после чего `marinara-engine-local` пересобран и контейнер успешно стартовал. Три последующих Storyboard-хода не показали fallback; дальнейшее наблюдение продолжается.
+
+## Storyboard после трекеров текущего хода
+
+`marinara-storyboard-after-trackers-v2.4.4.patch` обобщает ранее установленную логику Illustrator:
+
+- `world-state`, `custom-tracker` и `character-tracker` выполняются первыми;
+- после них и Illustrator, и Storyboard получают только успешные результаты **этого** хода в `memory._agentResults.currentTurnTrackerUpdates`;
+- этот блок явно имеет приоритет над сохранёнными результатами агентов и persisted game state; остальные post-processing агенты сохраняют прежнюю параллельную обработку;
+- добавленная регрессия проверяет, что оба визуальных агента получают результаты всех трёх трекеров.
+
+Патч проверен на чистой ветке `origin/staging` commit `731b195358b6fefc705cfdebfb103fc6c370ec69`: `git apply --check`, сборка shared-пакета, `agent-runtime` regression и TypeScript lint сервера прошли успешно. Его exact diff уже подтверждён в незакоммиченном рабочем дереве сервера; для него ожидается успешная обратная, а не прямая проверка. Перед применением других патчей всё равно сверяй commit и рабочее дерево.
+
+## Автоматический Roleplay Storyboard после сохранения трекеров
+
+Логи реального roleplay-хода показали отдельную гонку: специальный маршрут автоматического Roleplay Storyboard начинал планирование до завершения batch трекеров. Это не тот же путь, что обычный post-processing агент, поэтому общего патча выше недостаточно.
+
+`marinara-roleplay-storyboard-wait-for-trackers-v1.patch` добавляет серверный барьер:
+
+- генерация отмечает ход как незавершённый с момента, когда ответ становится видимым;
+- автоматический Roleplay Storyboard ждёт завершения post-processing и сохранения трекеров этого хода;
+- барьер снимается до медленного хвоста Illustrator, поэтому Storyboard не ждёт готового изображения, только актуального состояния;
+- в журнале появляются строки `Waiting for Roleplay tracker persistence` и `Roleplay tracker persistence completed` — по ним можно подтвердить порядок;
+- ручной запуск Storyboard и Game Storyboard не меняются.
+
+Патч добавляет два файла: `packages/server/src/services/generation/turn-post-processing-barrier.ts` и `scripts/regressions/turn-post-processing-barrier.regression.ts`. Он проверен на чистом `origin/staging` commit `731b195358b6fefc705cfdebfb103fc6c370ec69`: `git apply --check`, shared build, новая регрессия и TypeScript lint сервера прошли успешно. 30 августа 2026 года он применён к серверу и прошёл функциональную проверку: Storyboard начал ожидание в `1788089442127`, tracker batch завершился в `1788089448806`, а барьер был снят в `1788089448833`. SHA-256: `a2e546492bf19eed7181fdc5e55aaa0c5bfa1da50e91236036ffc41266f87b75`.
+
+## World Maps: финальная локация продолжения
+
+Патч и пакет образуют одну доработку:
+
+- `marinara-world-maps-final-scene-location-v1.patch` добавляет скрытую директиву `spatial_scene_location`, принимает её только при пустом roleplay-автопродолжении и фиксирует итоговую известную активную локацию. Обычный пользовательский переход по-прежнему имеет приоритет.
+- `hierarchical-maps-1.4.3-alderwick.1.zip` — переупакованный World Maps 1.4.2 с инструкцией модели выбрать **финальную сцену**, а не последнее упоминание места. Он не изменяет структуру карты или маршруты.
+- SHA-256 архива: `924e654a13eb98a7fb1a0f3387bb59c651fa41a5ae6c190ddcab16e873a5d14a`.
+
+Для установки архива патч добавляет только серверный метод `installLocalArtifact()`. У него нет HTTP-маршрута: архив читается исключительно из `/app/data/capability-packages/local-imports/` внутри уже существующего Docker volume. После установки нужен перезапуск контейнера.
+
+Вызов `installLocalArtifact()` выполняй от пользователя `node` (`docker compose exec --user node …`), чтобы реестр пакетов сохранил корректного владельца.
 
 ## Безопасная проверка патча
 

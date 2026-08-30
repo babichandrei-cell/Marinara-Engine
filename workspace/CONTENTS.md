@@ -93,12 +93,17 @@
 
 ## `patches/` — актуальные доработки
 
-Это набор файлов для изменения исходного кода Marinara Engine и упаковки capability-пакета **Character Lore Sync**. Скрипты применяются из корня исходного репозитория Marinara Engine, на который рассчитаны их пути.
+Это набор файлов для изменения исходного кода Marinara Engine и связанного capability-пакета World Maps. Скрипты и patch-файлы применяются из корня исходного репозитория Marinara Engine, на который рассчитаны их пути.
 
 | Файл | Назначение |
 | --- | --- |
 | `capability-api-1.14-current.patch` | Текущий крупный патч Capability API 1.14; затрагивает 20 файлов. |
 | `marinara-empty-send-continue-v8.patch` | Патч поведения пустой отправки/продолжения сообщения. |
+| `marinara-storyboard-after-trackers-v2.4.4.patch` | Запускает Storyboard и Illustrator после трёх трекеров и передаёт им успешные результаты текущего хода. |
+| `marinara-roleplay-storyboard-wait-for-trackers-v1.patch` | Серверный барьер: автоматический Roleplay Storyboard ждёт сохранения трекеров текущего хода. |
+| `marinara-storyboard-planner-output-budget-v1.patch` | Повышает output budget Roleplay Storyboard planner до 4096 и объясняет fallback при обрезанном JSON. |
+| `marinara-world-maps-final-scene-location-v1.patch` | Серверная поддержка финальной сценической локации при пустом roleplay-автопродолжении и доверенная локальная установка capability-пакета. |
+| `hierarchical-maps-1.4.3-alderwick.1.zip` | Связанный capability-архив World Maps для патча выше. |
 
 ### `patches/archive/2026-08-22/`
 
