@@ -1,0 +1,552 @@
+diff --git a/packages/shared/src/types/game-state.ts b/packages/shared/src/types/game-state.ts
+index c30281a..607106d 100644
+--- a/packages/shared/src/types/game-state.ts
++++ b/packages/shared/src/types/game-state.ts
+@@ -30,6 +30,11 @@ export interface GameState {
+    * character is present in this snapshot's final scene.
+    */
+   knownCharacters?: PresentCharacter[];
++  /**
++   * Latest known visual state for each Custom Tracker scene. Retained for
++   * Storyboard continuity only; it does not change the current HUD fields.
++   */
++  knownCustomTrackerScenes?: KnownCustomTrackerScene[];
+ 
+   // ── Events ──
+   recentEvents: string[];
+@@ -110,6 +115,12 @@ export interface CustomTrackerField {
+   locked?: boolean;
+ }
+ 
++/** A retained full Custom Tracker state, keyed by its non-empty Setting field. */
++export interface KnownCustomTrackerScene {
++  setting: string;
++  fields: CustomTrackerField[];
++}
++
+ /** A concise row maintained by the dedicated roleplay Inventory Tracker. */
+ export interface InventoryTrackerRow {
+   name: string;
+diff --git a/packages/server/src/db/schema/game-state.ts b/packages/server/src/db/schema/game-state.ts
+index 6f8be72..6320c23 100644
+--- a/packages/server/src/db/schema/game-state.ts
++++ b/packages/server/src/db/schema/game-state.ts
+@@ -22,6 +22,8 @@ export const gameStateSnapshots = fileTable("game_state_snapshots", {
+   presentCharacters: text("present_characters").notNull().default("[]"),
+   /** JSON array of the latest known Character Tracker states, including absent characters. */
+   knownCharacters: text("known_characters").notNull().default("[]"),
++  /** JSON array of retained Custom Tracker scene states for Storyboard continuity. */
++  knownCustomTrackerScenes: text("known_custom_tracker_scenes").notNull().default("[]"),
+   /** JSON array of recent event strings */
+   recentEvents: text("recent_events").notNull().default("[]"),
+   /** JSON object for player stats */
+diff --git a/packages/server/src/services/storage/game-state.storage.ts b/packages/server/src/services/storage/game-state.storage.ts
+index 1aea466..2b9c9f6 100644
+--- a/packages/server/src/services/storage/game-state.storage.ts
++++ b/packages/server/src/services/storage/game-state.storage.ts
+@@ -36,6 +36,7 @@ type GameStateUpdateFields = Partial<
+     | "worldCustomFields"
+     | "presentCharacters"
+     | "knownCharacters"
++    | "knownCustomTrackerScenes"
+     | "playerStats"
+     | "personaStats"
+     | "fieldLocks"
+@@ -56,6 +57,7 @@ type LockMigrationStateSource = {
+   worldCustomFields?: unknown;
+   presentCharacters?: unknown;
+   knownCharacters?: unknown;
++  knownCustomTrackerScenes?: unknown;
+   recentEvents?: unknown;
+   playerStats?: unknown;
+   personaStats?: unknown;
+@@ -126,6 +128,7 @@ function buildLockMigrationState(row: LockMigrationStateSource): GameState {
+     worldCustomFields: normalizeWorldCustomFields(parseSnapshotJson(row.worldCustomFields, [])),
+     presentCharacters: parseSnapshotJson(row.presentCharacters, []),
+     knownCharacters: parseSnapshotJson(row.knownCharacters, []),
++    knownCustomTrackerScenes: parseSnapshotJson(row.knownCustomTrackerScenes, []),
+     recentEvents: parseSnapshotJson(row.recentEvents, []),
+     playerStats: parseSnapshotJson(row.playerStats, null),
+     personaStats: parseSnapshotJson(row.personaStats, null),
+@@ -353,6 +356,7 @@ export function createGameStateStorage(db: DB) {
+         worldCustomFields: JSON.stringify(normalizeWorldCustomFields(state.worldCustomFields)),
+         presentCharacters: JSON.stringify(state.presentCharacters),
+         knownCharacters: JSON.stringify(state.knownCharacters ?? []),
++        knownCustomTrackerScenes: JSON.stringify(state.knownCustomTrackerScenes ?? []),
+         recentEvents: JSON.stringify(state.recentEvents),
+         playerStats: state.playerStats ? JSON.stringify(state.playerStats) : null,
+         personaStats: state.personaStats ? JSON.stringify(state.personaStats) : null,
+@@ -437,6 +441,11 @@ export function createGameStateStorage(db: DB) {
+             ? JSON.parse(latest.knownCharacters)
+             : latest.knownCharacters
+           : [],
++        knownCustomTrackerScenes: latest?.knownCustomTrackerScenes
++          ? typeof latest.knownCustomTrackerScenes === "string"
++            ? JSON.parse(latest.knownCustomTrackerScenes)
++            : latest.knownCustomTrackerScenes
++          : [],
+         recentEvents: latest?.recentEvents
+           ? typeof latest.recentEvents === "string"
+             ? JSON.parse(latest.recentEvents)
+@@ -470,6 +479,8 @@ export function createGameStateStorage(db: DB) {
+         baseState.worldCustomFields = normalizeWorldCustomFields(fields.worldCustomFields);
+       if (fields.presentCharacters !== undefined) baseState.presentCharacters = fields.presentCharacters as any;
+       if (fields.knownCharacters !== undefined) baseState.knownCharacters = fields.knownCharacters as any;
++      if (fields.knownCustomTrackerScenes !== undefined)
++        baseState.knownCustomTrackerScenes = fields.knownCustomTrackerScenes as any;
+       if (fields.playerStats !== undefined) baseState.playerStats = fields.playerStats as any;
+       if (fields.personaStats !== undefined) baseState.personaStats = fields.personaStats as any;
+       if (fields.fieldLocks !== undefined) {
+@@ -508,6 +519,8 @@ export function createGameStateStorage(db: DB) {
+         updates.worldCustomFields = JSON.stringify(normalizeWorldCustomFields(fields.worldCustomFields));
+       if (fields.presentCharacters !== undefined) updates.presentCharacters = JSON.stringify(fields.presentCharacters);
+       if (fields.knownCharacters !== undefined) updates.knownCharacters = JSON.stringify(fields.knownCharacters);
++      if (fields.knownCustomTrackerScenes !== undefined)
++        updates.knownCustomTrackerScenes = JSON.stringify(fields.knownCustomTrackerScenes);
+       if (fields.playerStats !== undefined)
+         updates.playerStats = fields.playerStats ? JSON.stringify(fields.playerStats) : null;
+       if (fields.personaStats !== undefined)
+diff --git a/packages/server/src/routes/generate/generate-route-utils.ts b/packages/server/src/routes/generate/generate-route-utils.ts
+index 37586c1..afd5015 100644
+--- a/packages/server/src/routes/generate/generate-route-utils.ts
++++ b/packages/server/src/routes/generate/generate-route-utils.ts
+@@ -20,6 +20,7 @@ import {
+   type GenerationParameterSendMap,
+   type GenerationParameters,
+   type InventoryTrackerRow,
++  type KnownCustomTrackerScene,
+   type MacroContext,
+   type PlayerStats,
+   type WrapFormat,
+@@ -1526,6 +1527,83 @@ export function mergeKnownTrackerCharacters(
+   return merged;
+ }
+ 
++function normalizedCustomTrackerSceneSetting(value: unknown): string {
++  return typeof value === "string" ? normalizeTextForMatch(value) : "";
++}
++
++function normalizeKnownCustomTrackerScene(value: unknown): KnownCustomTrackerScene | null {
++  if (!isPlainRecord(value) || typeof value.setting !== "string" || !Array.isArray(value.fields)) return null;
++  const setting = value.setting.trim();
++  if (!normalizedCustomTrackerSceneSetting(setting)) return null;
++  const fields = value.fields.flatMap((field) => {
++    if (!isPlainRecord(field) || typeof field.name !== "string" || typeof field.value !== "string") return [];
++    const name = field.name.trim();
++    return name ? [{ name, value: field.value, ...(typeof field.locked === "boolean" ? { locked: field.locked } : {}) }] : [];
++  });
++  return fields.length ? { setting, fields } : null;
++}
++
++function mergeKnownCustomTrackerSceneFields(
++  previousFields: KnownCustomTrackerScene["fields"],
++  updates: KnownCustomTrackerScene["fields"],
++): KnownCustomTrackerScene["fields"] {
++  const fields: KnownCustomTrackerScene["fields"] = [];
++  const indexByName = new Map<string, number>();
++  for (const field of [...previousFields, ...updates]) {
++    const key = normalizeTextForMatch(field.name);
++    if (!key) continue;
++    const index = indexByName.get(key);
++    if (index === undefined) {
++      indexByName.set(key, fields.length);
++      fields.push({ ...field });
++    } else {
++      fields[index] = { ...fields[index], ...field };
++    }
++  }
++  return fields;
++}
++
++/**
++ * Retain the most recent complete Custom Tracker state per established Setting.
++ * Entries without a setting are ignored because they cannot be safely attached
++ * to a storyboard keyframe.
++ */
++export function mergeKnownCustomTrackerScenes(
++  previousScenes: unknown[],
++  updates: unknown[],
++): KnownCustomTrackerScene[] {
++  const scenes: KnownCustomTrackerScene[] = [];
++  const indexBySetting = new Map<string, number>();
++  for (const candidate of [...previousScenes, ...updates]) {
++    const scene = normalizeKnownCustomTrackerScene(candidate);
++    if (!scene) continue;
++    const key = normalizedCustomTrackerSceneSetting(scene.setting);
++    const index = indexBySetting.get(key);
++    if (index === undefined) {
++      indexBySetting.set(key, scenes.length);
++      scenes.push({ setting: scene.setting, fields: scene.fields.map((field) => ({ ...field })) });
++    } else {
++      const prior = scenes[index]!;
++      scenes[index] = {
++        setting: scene.setting,
++        fields: mergeKnownCustomTrackerSceneFields(prior.fields, scene.fields),
++      };
++    }
++  }
++  return scenes;
++}
++
++export function customTrackerSceneFromFields(value: unknown): KnownCustomTrackerScene | null {
++  if (!Array.isArray(value)) return null;
++  const fields = value.flatMap((field) => {
++    if (!isPlainRecord(field) || typeof field.name !== "string" || typeof field.value !== "string") return [];
++    const name = field.name.trim();
++    return name ? [{ name, value: field.value, ...(typeof field.locked === "boolean" ? { locked: field.locked } : {}) }] : [];
++  });
++  const setting = fields.find((field) => normalizedCustomTrackerSceneSetting(field.name) === "setting")?.value?.trim();
++  return setting && fields.length ? { setting, fields } : null;
++}
++
+ type TrackerCharacterCardIdentity = {
+   id: string;
+   name: string;
+@@ -1739,6 +1817,7 @@ export function parseGameStateRow(row: Record<string, unknown>): GameState {
+     worldCustomFields: normalizeWorldCustomFields(parseJsonField<unknown[]>(row.worldCustomFields, [])),
+     presentCharacters: parseJsonField<any[]>(row.presentCharacters, []),
+     knownCharacters: parseJsonField<any[]>(row.knownCharacters, []),
++    knownCustomTrackerScenes: parseJsonField<any[]>(row.knownCustomTrackerScenes, []),
+     recentEvents: parseJsonField<string[]>(row.recentEvents, []),
+     playerStats: parseJsonField<PlayerStats | null>(row.playerStats, null),
+     personaStats: parseJsonField<any[] | null>(row.personaStats, null),
+diff --git a/packages/server/src/services/agents/agent-executor.ts b/packages/server/src/services/agents/agent-executor.ts
+index a3be6fb..93a6f2d 100644
+--- a/packages/server/src/services/agents/agent-executor.ts
++++ b/packages/server/src/services/agents/agent-executor.ts
+@@ -2954,6 +2954,14 @@ function buildAgentExtras(
+     parts.push(`</character_tracker_known_updates_contract>`);
+   }
+ 
++  if (agentTypes.includes("custom-tracker")) {
++    parts.push("<custom_tracker_known_scene_updates_contract>");
++    parts.push(
++      'Alongside "fields", return "knownSceneStateUpdates": an array of complete { setting, fields } records for every established visual scene whose Custom Tracker state was introduced or changed anywhere in the latest assistant response. "setting" must exactly match that record\'s non-empty Setting field and "fields" must contain the complete Custom Tracker field array for that scene. Include an earlier scene even if the response ends elsewhere. Keep "fields" limited to the final current scene. Use [] when no additional scene state must be retained. Do not emit a scene record without an established non-empty Setting.',
++    );
++    parts.push("</custom_tracker_known_scene_updates_contract>");
++  }
++
+   if (agentTypes.includes("illustrator") && gameImageStylePrompt) {
+     parts.push(`<game_image_instructions>`);
+     parts.push(
+diff --git a/packages/server/src/routes/game.routes.ts b/packages/server/src/routes/game.routes.ts
+index 901fe87..fab5066 100644
+--- a/packages/server/src/routes/game.routes.ts
++++ b/packages/server/src/routes/game.routes.ts
+@@ -5692,6 +5692,8 @@ function buildStoryboardRoleplayContextBlock(args: {
+   const latest = asStoryboardRecord(args.latestState);
+   const presentCharacters = parseStoredJson<Array<Record<string, unknown>>>(latest.presentCharacters) ?? [];
+   const knownCharacters = parseStoredJson<Array<Record<string, unknown>>>(latest.knownCharacters) ?? [];
++  const knownCustomTrackerScenes =
++    parseStoredJson<Array<Record<string, unknown>>>(latest.knownCustomTrackerScenes) ?? [];
+   const lines = [
+     "Mode: Roleplay",
+     args.spatialBreadcrumb ? `Location: ${compactStoryboardText(args.spatialBreadcrumb, 800)}` : "",
+@@ -5705,6 +5707,12 @@ function buildStoryboardRoleplayContextBlock(args: {
+     knownCharacters.length
+       ? "Known character states are visual continuity reference only. They do not make a character present in a scene; show someone only when the episode narration or Current Character Tracker state places them there."
+       : "",
++    knownCustomTrackerScenes.length
++      ? "known_custom_tracker_scene_states: " + JSON.stringify(knownCustomTrackerScenes)
++      : "",
++    knownCustomTrackerScenes.length
++      ? "Known Custom Tracker scene states are visual continuity reference only. They do not make a setting current or a prop visible; use an entry only when the episode narration anchors the keyframe in that setting."
++      : "",
+   ].filter(Boolean);
+   return `<roleplay_context>\n${lines.map(escapeXmlAttribute).join("\n")}\n</roleplay_context>`;
+ }
+@@ -12162,8 +12170,15 @@ export async function gameRoutes(app: FastifyInstance) {
+           parseStoredJson<Array<Record<string, unknown>>>(storyboardState.presentCharacters)?.length ?? 0;
+         const knownCharacterCount =
+           parseStoredJson<Array<Record<string, unknown>>>(storyboardState.knownCharacters)?.length ?? 0;
++        const knownCustomTrackerSceneCount =
++          parseStoredJson<Array<Record<string, unknown>>>(storyboardState.knownCustomTrackerScenes)?.length ?? 0;
+         logger.info(
+-          `[game/storyboard] Character context: presentCharacters=${presentCharacterCount}, knownCharacters=${knownCharacterCount}`,
++          "[game/storyboard] Continuity context: presentCharacters=" +
++            presentCharacterCount +
++            ", knownCharacters=" +
++            knownCharacterCount +
++            ", knownCustomTrackerScenes=" +
++            knownCustomTrackerSceneCount,
+         );
+       }
+       const charStore = createCharactersStorage(app.db);
+diff --git a/packages/server/src/routes/generate.routes.ts b/packages/server/src/routes/generate.routes.ts
+index c43929c..b737c44 100644
+--- a/packages/server/src/routes/generate.routes.ts
++++ b/packages/server/src/routes/generate.routes.ts
+@@ -257,6 +257,8 @@ import {
+   canonicalizeGamePartySpeakerLabels,
+   collectLatestTrackerCharacterHistory,
+   mergeKnownTrackerCharacters,
++  mergeKnownCustomTrackerScenes,
++  customTrackerSceneFromFields,
+   createLocalSidecarGenerationConnection,
+   extractImageAttachmentDataUrls,
+   appendNonLeadingSystemMessagesToLastUser,
+@@ -8769,6 +8771,10 @@ export async function generateRoutes(app: FastifyInstance) {
+                 // them with authoritative data in their own handler blocks below.
+                 const snapshotChars = parseJsonField<any[]>(prevSnap?.presentCharacters, []);
+                 const snapshotKnownCharacters = parseJsonField<any[]>(prevSnap?.knownCharacters, []);
++                const snapshotKnownCustomTrackerScenes = parseJsonField<any[]>(
++                  prevSnap?.knownCustomTrackerScenes,
++                  [],
++                );
+                 const snapshotWorldCustomFields = normalizeWorldCustomFields(
+                   parseJsonField<unknown[]>(prevSnap?.worldCustomFields, []),
+                 );
+@@ -8814,6 +8820,7 @@ export async function generateRoutes(app: FastifyInstance) {
+                     worldCustomFields: newWorldCustomFields,
+                     presentCharacters: snapshotChars,
+                     knownCharacters: snapshotKnownCharacters,
++                    knownCustomTrackerScenes: snapshotKnownCustomTrackerScenes,
+                     recentEvents: (gs.recentEvents as string[]) ?? [],
+                     playerStats: snapshotPlayerStats,
+                     personaStats: snapshotPersonaStats,
+@@ -9293,7 +9300,10 @@ export async function generateRoutes(app: FastifyInstance) {
+                 const ctData = result.data as Record<string, unknown>;
+                 const hasFields = Array.isArray(ctData.fields);
+                 const rawFields = hasFields ? (ctData.fields as any[]) : [];
+-                if (hasFields) {
++                const knownSceneStateUpdates = Array.isArray(ctData.knownSceneStateUpdates)
++                  ? ctData.knownSceneStateUpdates
++                  : [];
++                if (hasFields || knownSceneStateUpdates.length > 0) {
+                   // Ensure a snapshot exists for this (messageId, swipeIndex)
+                   let snap = await gameStateStore.getByMessage(messageId, targetSwipeIndex);
+                   if (!snap) {
+@@ -9303,25 +9313,47 @@ export async function generateRoutes(app: FastifyInstance) {
+                     snap = await gameStateStore.getByMessage(messageId, targetSwipeIndex);
+                   }
+                   const customLockState = snap ? parseGameStateRow(snap as Record<string, unknown>) : null;
+-                  const customTrackerPatch = buildLockedPlayerStatsArrayPatch<any>({
+-                    field: "customTrackerFields",
+-                    values: rawFields,
+-                    snapshot: snap,
+-                    lockState: customLockState,
+-                  });
+-                  if (snap && customTrackerPatch.changed) {
++                  const customTrackerPatch = hasFields
++                    ? buildLockedPlayerStatsArrayPatch<any>({
++                        field: "customTrackerFields",
++                        values: rawFields,
++                        snapshot: snap,
++                        lockState: customLockState,
++                      })
++                    : null;
++                  const currentScene = customTrackerPatch
++                    ? customTrackerSceneFromFields(customTrackerPatch.values)
++                    : null;
++                  const previousKnownScenes = parseJsonField<any[]>(snap?.knownCustomTrackerScenes, []);
++                  const knownCustomTrackerScenes = mergeKnownCustomTrackerScenes(previousKnownScenes, [
++                    ...knownSceneStateUpdates,
++                    ...(currentScene ? [currentScene] : []),
++                  ]);
++                  if (
++                    snap &&
++                    ((customTrackerPatch?.changed ?? false) ||
++                      knownSceneStateUpdates.length > 0 ||
++                      knownCustomTrackerScenes.length !== previousKnownScenes.length)
++                  ) {
+                     await app.db
+                       .update(gameStateSnapshotsTable)
+                       .set({
+-                        playerStats: JSON.stringify(customTrackerPatch.playerStats),
+-                        fieldLocks: serializeMigratedTrackerLocks(customLockState),
++                        ...(customTrackerPatch ? { playerStats: JSON.stringify(customTrackerPatch.playerStats) } : {}),
++                        knownCustomTrackerScenes: JSON.stringify(knownCustomTrackerScenes),
++                        ...(customTrackerPatch
++                          ? { fieldLocks: serializeMigratedTrackerLocks(customLockState) }
++                          : {}),
+                       })
+                       .where(eq(gameStateSnapshotsTable.id, snap.id));
+                   }
+-                  if (customTrackerPatch.changed) {
++                  if (customTrackerPatch?.changed) {
+                     logger.debug("[game_state_patch] custom-tracker: %j", customTrackerPatch.values);
+                     sendSseEvent(reply, { type: "game_state_patch", data: customTrackerPatch.patch });
+                   }
++                  logger.info(
++                    "[generate] custom-tracker: knownCustomTrackerScenes=%s",
++                    knownCustomTrackerScenes.length,
++                  );
+                 }
+               } catch (err) {
+                 logger.error(err, "[generate] Failed to apply custom tracker update");
+diff --git a/packages/server/src/routes/generate/retry-agents-route.ts b/packages/server/src/routes/generate/retry-agents-route.ts
+index 934212b..2b37597 100644
+--- a/packages/server/src/routes/generate/retry-agents-route.ts
++++ b/packages/server/src/routes/generate/retry-agents-route.ts
+@@ -127,6 +127,8 @@ import {
+   applyTrackerCharacterCardIdentity,
+   collectLatestTrackerCharacterHistory,
+   mergeKnownTrackerCharacters,
++  mergeKnownCustomTrackerScenes,
++  customTrackerSceneFromFields,
+   isMessageHiddenFromAI,
+   parseExtra,
+   parseJsonField,
+@@ -3175,24 +3177,43 @@ async function applyRetryResultEffects(args: {
+         const ctData = result.data as Record<string, unknown>;
+         const hasFields = Array.isArray(ctData.fields);
+         const rawFields = hasFields ? (ctData.fields as any[]) : [];
+-        if (hasFields) {
++        const knownSceneStateUpdates = Array.isArray(ctData.knownSceneStateUpdates) ? ctData.knownSceneStateUpdates : [];
++        if (hasFields || knownSceneStateUpdates.length > 0) {
+           const snap = await loadRetryTargetGameStateSnapshot();
+           assertRetryActive();
+-          const customTrackerPatch = buildLockedPlayerStatsArrayPatch<any>({
+-            field: "customTrackerFields",
+-            values: rawFields,
+-            snapshot: snap,
+-            lockState: snap ? parseGameStateRow(snap as Record<string, unknown>) : null,
+-          });
+-          if (snap && customTrackerPatch.changed) {
++          const customTrackerPatch = hasFields
++            ? buildLockedPlayerStatsArrayPatch<any>({
++                field: "customTrackerFields",
++                values: rawFields,
++                snapshot: snap,
++                lockState: snap ? parseGameStateRow(snap as Record<string, unknown>) : null,
++              })
++            : null;
++          const currentScene = customTrackerPatch
++            ? customTrackerSceneFromFields(customTrackerPatch.values)
++            : null;
++          const previousKnownScenes = parseJsonField<any[]>(snap?.knownCustomTrackerScenes, []);
++          const knownCustomTrackerScenes = mergeKnownCustomTrackerScenes(previousKnownScenes, [
++            ...knownSceneStateUpdates,
++            ...(currentScene ? [currentScene] : []),
++          ]);
++          if (
++            snap &&
++            ((customTrackerPatch?.changed ?? false) ||
++              knownSceneStateUpdates.length > 0 ||
++              knownCustomTrackerScenes.length !== previousKnownScenes.length)
++          ) {
+             assertRetryActive();
+             await app.db
+               .update(gameStateSnapshotsTable)
+-              .set({ playerStats: JSON.stringify(customTrackerPatch.playerStats) })
++              .set({
++                ...(customTrackerPatch ? { playerStats: JSON.stringify(customTrackerPatch.playerStats) } : {}),
++                knownCustomTrackerScenes: JSON.stringify(knownCustomTrackerScenes),
++              })
+               .where(eq(gameStateSnapshotsTable.id, snap.id));
+             assertRetryActive();
+           }
+-          if (customTrackerPatch.changed) {
++          if (customTrackerPatch?.changed) {
+             assertRetryActive();
+             sendSseEvent(reply, { type: "game_state_patch", data: customTrackerPatch.patch });
+           }
+diff --git a/scripts/regressions/prompt.regression.ts b/scripts/regressions/prompt.regression.ts
+index 87d96f3..177fb69 100644
+--- a/scripts/regressions/prompt.regression.ts
++++ b/scripts/regressions/prompt.regression.ts
+@@ -742,6 +742,8 @@ import {
+   appendSeparateAgentInjectionMessage,
+   collectLatestTrackerCharacterHistory,
+   mergeKnownTrackerCharacters,
++  mergeKnownCustomTrackerScenes,
++  customTrackerSceneFromFields,
+   computeSummaryHideIds,
+   formatSeparateAgentInjection,
+   getMessageHiddenFromAICharacterIds,
+@@ -10630,6 +10632,69 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
+         ],
+         "known-character updates must retain absent characters and replace only the fields that changed",
+       );
++      const knownCustomTrackerScenes = mergeKnownCustomTrackerScenes(
++        [
++          {
++            setting: "The Archive",
++            fields: [
++              { name: "Setting", value: "The Archive" },
++              { name: "Environment", value: "Brass shelves; locked cabinet" },
++              { name: "Visible Objects", value: "Atlas — on central table" },
++            ],
++          },
++        ],
++        [
++          {
++            setting: "The Archive",
++            fields: [
++              { name: "Setting", value: "The Archive" },
++              { name: "Visible Objects", value: "Atlas — carried by Mira" },
++            ],
++          },
++          {
++            setting: "Rainy Courtyard",
++            fields: [
++              { name: "Setting", value: "Rainy Courtyard" },
++              { name: "Environment", value: "Stone fountain; iron gate" },
++            ],
++          },
++        ],
++      );
++      assert.deepEqual(
++        knownCustomTrackerScenes,
++        [
++          {
++            setting: "The Archive",
++            fields: [
++              { name: "Setting", value: "The Archive" },
++              { name: "Environment", value: "Brass shelves; locked cabinet" },
++              { name: "Visible Objects", value: "Atlas — carried by Mira" },
++            ],
++          },
++          {
++            setting: "Rainy Courtyard",
++            fields: [
++              { name: "Setting", value: "Rainy Courtyard" },
++              { name: "Environment", value: "Stone fountain; iron gate" },
++            ],
++          },
++        ],
++        "known Custom Tracker scenes must retain prior settings and update only the changed fields",
++      );
++      assert.deepEqual(
++        customTrackerSceneFromFields([
++          { name: "Scene Style", value: "Victorian occult" },
++          { name: "Setting", value: "The Archive" },
++        ]),
++        {
++          setting: "The Archive",
++          fields: [
++            { name: "Scene Style", value: "Victorian occult" },
++            { name: "Setting", value: "The Archive" },
++          ],
++        },
++        "the final Custom Tracker fields must become a retained scene when Setting is present",
++      );
+       const returningCharacters: Array<Record<string, unknown>> = [
+         {
+           characterId: "Mira",
+@@ -11024,6 +11089,24 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
+       assert.match(system, /"knownCharacterUpdates"/u);
+     },
+   },
++  {
++    name: "custom tracker receives retained scene-state output contract",
++    async run() {
++      const { calls, provider } = makeCapturingProvider('{"fields":[]}');
++      const config = makeRegressionAgentConfig({
++        id: "builtin:custom-tracker",
++        type: "custom-tracker",
++        name: "Custom Tracker",
++        promptTemplate: "Track the final scene fields as JSON.",
++        settings: { resultType: "custom_tracker_update" },
++      });
++      await executeAgent(config as any, makeRegressionAgentContext(), provider as any, "regression-model");
++      const system = calls[0]?.[0]?.content ?? "";
++      assert.match(system, /<custom_tracker_known_scene_updates_contract>/u);
++      assert.match(system, /"knownSceneStateUpdates"/u);
++      assert.match(system, /earlier scene even if the response ends elsewhere/u);
++    },
++  },
+   {
+     name: "individual group lorebook filters are scoped to the responding character",
+     run() {
+
