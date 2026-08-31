@@ -22,6 +22,9 @@
 | `patches/marinara-storyboard-after-trackers-v2.4.4.patch` | Распространяет текущую последовательность Illustrator на Storyboard. | Его изменение уже обнаружено в незакоммиченном рабочем дереве сервера; повторно не применять. |
 | `patches/marinara-roleplay-storyboard-wait-for-trackers-v1.patch` | Не даёт автоматическому Roleplay Storyboard начать планирование до сохранения трекеров текущего хода. | Применён и пересобран на сервере 30 августа 2026 года; проверен реальным roleplay-ходом. Не применять повторно. |
 | `patches/marinara-storyboard-planner-output-budget-v1.patch` | Увеличивает output budget Roleplay Storyboard planner до 4096 и явно сообщает об обрезанном JSON. | Применён и пересобран на сервере 30 августа 2026 года; контейнер запустился без ошибок, первые три Storyboard-хода прошли штатно. |
+| `patches/marinara-roleplay-storyboard-known-characters-v2.patch` | Накопительный каталог последних состояний персонажей для Roleplay Storyboard. | Применён и пересобран на сервере 31 августа 2026 года; логи подтвердили `knownCharacters=2` и передачу каталога после барьера сохранения. Не применять повторно. |
+| `patches/marinara-roleplay-storyboard-known-custom-tracker-scenes-v1.patch` | Накопительный каталог последних состояний локаций Custom Tracker для Roleplay Storyboard. | Применён и пересобран на сервере 31 августа 2026 года; логи подтвердили `knownCustomTrackerScenes=1` и передачу каталога после барьера сохранения. Не применять повторно. |
+| `patches/marinara-roleplay-storyboard-first-response-v1.patch` | Запускает автоматический Roleplay Storyboard после первого нового ответа модели в пустом чате. | Применён и пересобран на сервере 31 августа 2026 года; пользователь подтвердил работу после первого ответа. Не применять повторно. |
 | `patches/marinara-world-maps-final-scene-location-v1.patch` | Для roleplay-автопродолжения фиксирует в World Maps финальную сценическую локацию ответа модели; добавляет безопасную локальную установку capability-архива. | Применён к серверу на базе `9535709bb` 28 августа 2026 года. Активен пакет `hierarchical-maps@1.4.3-alderwick.1`; его readiness — `ready`. Не применять повторно. |
 
 **Вывод:** эти файлы не являются автоматическим рецептом развёртывания текущего сервера. Они сохраняют историю и состав локальных доработок. Перед применением нужен анализ конкретного commit и целевых файлов.
@@ -62,6 +65,40 @@
 - ручной запуск Storyboard и Game Storyboard не меняются.
 
 Патч добавляет два файла: `packages/server/src/services/generation/turn-post-processing-barrier.ts` и `scripts/regressions/turn-post-processing-barrier.regression.ts`. Он проверен на чистом `origin/staging` commit `731b195358b6fefc705cfdebfb103fc6c370ec69`: `git apply --check`, shared build, новая регрессия и TypeScript lint сервера прошли успешно. 30 августа 2026 года он применён к серверу и прошёл функциональную проверку: Storyboard начал ожидание в `1788089442127`, tracker batch завершился в `1788089448806`, а барьер был снят в `1788089448833`. SHA-256: `a2e546492bf19eed7181fdc5e55aaa0c5bfa1da50e91236036ffc41266f87b75`.
+
+## Known Characters для Roleplay Storyboard
+
+`marinara-roleplay-storyboard-known-characters-v2.patch` вводит неотображаемое поле `knownCharacters` в каждом `game_state_snapshot`. Это накопительный каталог последних известных состояний Character Tracker, а `presentCharacters` остаётся только финальным составом сцены для HUD.
+
+- Character Tracker получает контракт `knownCharacterUpdates`: он указывает тех, чьё визуальное или личное состояние появилось либо изменилось в любом месте последнего ответа, даже если персонаж ушёл до финала;
+- сервер объединяет эти изменения с каталогом предыдущего snapshot по `characterId` (или имени) и не удаляет отсутствующих персонажей;
+- новый snapshot наследует каталог без сканирования всей истории; старые snapshot без поля остаются совместимыми;
+- Roleplay Storyboard получает фактический `known_characters_current_state`, а также список имён таких NPC как допустимые. В инструкцию явно внесено: запись в каталоге — лишь reference для внешности, не признак присутствия в кадре;
+- повторный запуск трекеров обрабатывается тем же способом.
+
+`v1` не применялся и сохранён в `patches/archive/2026-08-31/`; `v2` собран на точном снимке `9535709bb` с уже наложенными `marinara-roleplay-storyboard-wait-for-trackers-v1.patch` и `marinara-storyboard-planner-output-budget-v1.patch`, а также добавляет диагностические логи количества `knownCharacters`. Он применён 31 августа 2026 года: реальный ход показал ожидание барьера, затем `knownCharacters=2`, снятие барьера и контекст Storyboard `presentCharacters=2, knownCharacters=2`. SHA-256 `v2`: `2a833c24706e03e7cbd5569a15847045752ea861dd5fddc99ac549918423bf3b`.
+
+## Known Custom Tracker scenes для Roleplay Storyboard
+
+`marinara-roleplay-storyboard-known-custom-tracker-scenes-v1.patch` продолжает ту же модель для визуальных полей Custom Tracker. Он не создаёт одну «историю всех полей»: запись имеет идентификатор из непустого поля `Setting` и содержит полный последний набор полей для соответствующей локации.
+
+- Custom Tracker получает контракт `knownSceneStateUpdates`: для каждой локации, которую последний ответ явно показал или изменил, он возвращает `{ setting, fields }`, даже если ответ завершился в другом месте;
+- сервер добавляет финальные `fields` текущей сцены автоматически и объединяет записи по нормализованному `Setting`, сохраняя ранее известные локации;
+- `customTrackerFields` остаются финальным состоянием и единственным значением HUD;
+- Roleplay Storyboard получает `known_custom_tracker_scene_states` как visual continuity reference. Запись не делает локацию текущей и не добавляет её объекты в кадр без опоры на эпизод;
+- повторный запуск Custom Tracker обновляет этот же каталог.
+
+Патч построен против фактического состояния `9535709bb` с уже применёнными четырьмя доработками Roleplay Storyboard, включая `known-characters v2`. Проверены прямая проверка на этом состоянии, обратная проверка на изменённом checkout, `git diff --check`, TypeScript lint сервера, shared build, `prompt.regression.ts` и `agent-runtime.regression.ts`. Он применён и проверен 31 августа 2026 года: реальный ход показал `knownCustomTrackerScenes=1` до `Roleplay tracker persistence completed`, затем Storyboard получил тот же счётчик в continuity context. SHA-256: `31f45e157de443a3d52996674b8d74cb0cc1c40315422f6f62206d46f10db2ab`.
+
+## Первый ответ автоматического Roleplay Storyboard
+
+`marinara-roleplay-storyboard-first-response-v1.patch` устраняет пропуск первого assistant response в новом Roleplay-чате. Серверный `Default Roleplay episode interval = 1` уже выбирает первый завершённый обмен корректно; проблема была в клиентском effect `ChatRoleplaySurface`.
+
+- при открытии чата первый найденный assistant response остаётся baseline и не запускает историю задним числом;
+- если первичная загрузка показала пустой чат, baseline помечается отдельно, поэтому первый действительно новый assistant response автоматически запускает Storyboard;
+- запуск по-прежнему ждёт окончания стрима, обработки агентов и tracker post-processing; ручной режим не меняется.
+
+Патч собран поверх фактического состава серверных доработок на `9535709bb`, включая уже установленный `known-custom-tracker-scenes v1`. Локально прошли client lint, `prompt.regression.ts`, `git diff --check`, прямая и обратная проверки патча на этом составе. Он применён и пересобран 31 августа 2026 года; пользователь подтвердил автоматическую генерацию после первого ответа модели. SHA-256: `b7aef4baba1761ca64f6eff6f77bdfc9f07ea710701790f65d3c4fce04815c6d`.
 
 ## World Maps: финальная локация продолжения
 
@@ -110,3 +147,4 @@ git apply --check -R /путь/к/patches/имя-патча.patch
 
 - `patches/archive/2026-08-22/` — ранние варианты Capability API и Character Lore Sync.
 - `patches/archive/2026-08-27/` — Character Lore Sync 0.2.3 и вспомогательные скрипты, вынесенные из корня после ревизии актуальности.
+- `patches/archive/2026-08-31/` — не применённый `known-characters` v1, заменённый расширенным v2.

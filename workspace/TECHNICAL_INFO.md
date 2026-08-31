@@ -12,7 +12,7 @@
 | Удалённый репозиторий `origin` | `git@github.com:babichandrei-cell/Marinara-Engine.git` |
 | Вышестоящий репозиторий `upstream` | `git@github.com:Pasta-Devs/Marinara-Engine.git` |
 | Ветка развёртывания | `staging` |
-| Текущий commit | `9535709bb`; в рабочем дереве сервера также применены незакоммиченные доработки World Maps, оба патча последовательности Storyboard и патч planner output budget 4096. |
+| Текущий commit | `9535709bb`; в рабочем дереве сервера также применены незакоммиченные доработки World Maps, оба патча последовательности Storyboard, planner output budget 4096 и каталоги состояний Character/Custom Tracker. |
 | Версия | `v2.4.4-6-g9535709bb` — шесть коммитов после тега `v2.4.4` |
 
 ## Сервер и доступ
@@ -61,6 +61,24 @@
 - `patches/marinara-storyboard-planner-output-budget-v1.patch` применён 30 августа 2026 года: лимит output tokens повышен с 2200/3600 до 4096.
 - При неполном JSON после достижения лимита интерфейс теперь сообщает реальную причину вместо ложного `Storyboard Illustrator returned no usable keyframes`; fallback сохраняется как безопасное поведение.
 - После пересборки `marinara-engine-local` сервер стартовал штатно; первые три хода Storyboard после установки прошли без fallback.
+
+### Накопительные состояния Character Tracker
+
+- `patches/marinara-roleplay-storyboard-known-characters-v2.patch` применён и пересобран на сервере 31 августа 2026 года. Реальные логи подтвердили порядок сохранения и контекст Storyboard: `knownCharacters=2`, `presentCharacters=2`.
+- Патч добавляет в `game_state_snapshots` JSON-поле `knownCharacters`. Оно версионно хранится вместе с сообщением и свайпом, не выводится в HUD и не заменяет `presentCharacters`.
+- Character Tracker обновляет каталог через `knownCharacterUpdates`; Roleplay Storyboard получает этот каталог как `known_characters_current_state` после уже установленного барьера сохранения трекеров.
+
+### Накопительные состояния Custom Tracker
+
+- `patches/marinara-roleplay-storyboard-known-custom-tracker-scenes-v1.patch` применён и пересобран на сервере 31 августа 2026 года. Реальные логи подтвердили порядок сохранения и контекст Storyboard: `knownCustomTrackerScenes=1`.
+- Он добавляет в `game_state_snapshots` скрытое JSON-поле `knownCustomTrackerScenes`, где ключом служит непустой `Setting`, а значением — последние известные поля Custom Tracker для этой локации.
+- Финальные `customTrackerFields` в HUD не меняются. Roleplay Storyboard получает каталог как `known_custom_tracker_scene_states` только для ключевого кадра, который эпизод явно связывает с соответствующей локацией.
+
+### Первый ответ автоматического Roleplay Storyboard
+
+- `patches/marinara-roleplay-storyboard-first-response-v1.patch` применён и пересобран на сервере 31 августа 2026 года. Пользователь подтвердил, что автоматическая генерация теперь стартует после первого ответа модели в новом чате.
+- Патч исправляет клиентскую стартовую логику, а не серверный cadence interval.
+- При первичной загрузке старого чата интерфейс запоминает уже существующий последний ответ и не запускает генерацию ретроактивно. При первичной загрузке пустого чата он остаётся готовым: первый новый assistant response проходит обычные проверки завершения стрима и tracker post-processing, после чего запускает Storyboard.
 
 ### Генерация изображений
 
@@ -123,7 +141,7 @@ git rev-parse --short HEAD
 - [Описание содержимого рабочей папки](CONTENTS.md).
 - `connections/Deckards_Brain_31B.connection.json` — экспорт подключения текстовой модели и embeddings.
 - `connections/ComfyUI_Krea2.connection.json` — экспорт подключения и workflow ComfyUI.
-- `patches/` — актуальные серверные патчи. Для Roleplay Storyboard подготовлен дополнительный серверный барьер `marinara-roleplay-storyboard-wait-for-trackers-v1.patch`: он ждёт сохранения tracker state перед автоматической раскадровкой. World Maps используют `marinara-world-maps-final-scene-location-v1.patch` и capability-архив `hierarchical-maps-1.4.3-alderwick.1.zip`; порядок применения и проверки — в `PATCHES.md`.
+- `patches/` — актуальные серверные патчи. Для Roleplay Storyboard установлены барьер `marinara-roleplay-storyboard-wait-for-trackers-v1.patch` и planner output budget; подготовлен `marinara-roleplay-storyboard-known-characters-v2.patch` для каталога состояний персонажей. World Maps используют `marinara-world-maps-final-scene-location-v1.patch` и capability-архив `hierarchical-maps-1.4.3-alderwick.1.zip`; порядок применения и проверки — в `PATCHES.md`.
 
 ### Установленные capability-пакеты
 

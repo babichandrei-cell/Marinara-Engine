@@ -1,0 +1,544 @@
+diff --git a/packages/server/src/db/schema/game-state.ts b/packages/server/src/db/schema/game-state.ts
+index a5c70324f..6f8be72ea 100644
+--- a/packages/server/src/db/schema/game-state.ts
++++ b/packages/server/src/db/schema/game-state.ts
+@@ -20,6 +20,8 @@ export const gameStateSnapshots = fileTable("game_state_snapshots", {
+ 
+   /** JSON array of PresentCharacter objects */
+   presentCharacters: text("present_characters").notNull().default("[]"),
++  /** JSON array of the latest known Character Tracker states, including absent characters. */
++  knownCharacters: text("known_characters").notNull().default("[]"),
+   /** JSON array of recent event strings */
+   recentEvents: text("recent_events").notNull().default("[]"),
+   /** JSON object for player stats */
+diff --git a/packages/server/src/routes/game.routes.ts b/packages/server/src/routes/game.routes.ts
+index edfcab705..901fe8757 100644
+--- a/packages/server/src/routes/game.routes.ts
++++ b/packages/server/src/routes/game.routes.ts
+@@ -555,17 +555,27 @@ function getStoryboardLibraryCharacterIds(
+ function storyboardTrackedNpcsFromState(latestState: unknown): Array<Record<string, unknown>> {
+   const latest = asStoryboardRecord(latestState);
+   const presentCharacters = parseStoredJson<Array<Record<string, unknown>>>(latest.presentCharacters) ?? [];
++  const knownCharacters = parseStoredJson<Array<Record<string, unknown>>>(latest.knownCharacters) ?? [];
+   const trackedNpcs: Array<Record<string, unknown>> = [];
+-  for (const character of presentCharacters) {
++  const trackedNpcIndexByName = new Map<string, number>();
++  for (const character of [...knownCharacters, ...presentCharacters]) {
+     const name = readTrimmedString(character.name);
+     if (!name) continue;
+-    trackedNpcs.push({
++    const trackedNpc = {
+       name,
+       description: readTrimmedString(character.appearance) ?? readTrimmedString(character.description) ?? "",
+       avatarUrl: readTrimmedString(character.avatarPath) ?? readTrimmedString(character.avatarUrl),
+       gender: readTrimmedString(character.gender),
+       pronouns: readTrimmedString(character.pronouns),
+-    });
++    };
++    const key = normalizeAvatarLookupName(name);
++    const existingIndex = trackedNpcIndexByName.get(key);
++    if (existingIndex === undefined) {
++      trackedNpcIndexByName.set(key, trackedNpcs.length);
++      trackedNpcs.push(trackedNpc);
++    } else {
++      trackedNpcs[existingIndex] = trackedNpc;
++    }
+   }
+   return trackedNpcs;
+ }
+@@ -5681,6 +5691,7 @@ function buildStoryboardRoleplayContextBlock(args: {
+ }): string {
+   const latest = asStoryboardRecord(args.latestState);
+   const presentCharacters = parseStoredJson<Array<Record<string, unknown>>>(latest.presentCharacters) ?? [];
++  const knownCharacters = parseStoredJson<Array<Record<string, unknown>>>(latest.knownCharacters) ?? [];
+   const lines = [
+     "Mode: Roleplay",
+     args.spatialBreadcrumb ? `Location: ${compactStoryboardText(args.spatialBreadcrumb, 800)}` : "",
+@@ -5690,6 +5701,10 @@ function buildStoryboardRoleplayContextBlock(args: {
+     presentCharacters.length
+       ? `Current Character Tracker state: ${compactStoryboardText(JSON.stringify(presentCharacters.slice(0, 20)), 3000)}`
+       : "",
++    knownCharacters.length ? `known_characters_current_state: ${JSON.stringify(knownCharacters)}` : "",
++    knownCharacters.length
++      ? "Known character states are visual continuity reference only. They do not make a character present in a scene; show someone only when the episode narration or Current Character Tracker state places them there."
++      : "",
+   ].filter(Boolean);
+   return `<roleplay_context>\n${lines.map(escapeXmlAttribute).join("\n")}\n</roleplay_context>`;
+ }
+@@ -12141,6 +12156,16 @@ export async function gameRoutes(app: FastifyInstance) {
+         (await createGameStateStorage(app.db)
+           .getLatest(input.chatId)
+           .catch(() => null));
++      if (ownerMode === "roleplay") {
++        const storyboardState = asStoryboardRecord(fallbackState);
++        const presentCharacterCount =
++          parseStoredJson<Array<Record<string, unknown>>>(storyboardState.presentCharacters)?.length ?? 0;
++        const knownCharacterCount =
++          parseStoredJson<Array<Record<string, unknown>>>(storyboardState.knownCharacters)?.length ?? 0;
++        logger.info(
++          `[game/storyboard] Character context: presentCharacters=${presentCharacterCount}, knownCharacters=${knownCharacterCount}`,
++        );
++      }
+       const charStore = createCharactersStorage(app.db);
+       const storyboardCharacterContext = await buildStoryboardCharacterContext({
+         characters: charStore,
+diff --git a/packages/server/src/routes/generate.routes.ts b/packages/server/src/routes/generate.routes.ts
+index 1cff11e2d..c43929c57 100644
+--- a/packages/server/src/routes/generate.routes.ts
++++ b/packages/server/src/routes/generate.routes.ts
+@@ -256,6 +256,7 @@ import {
+   applyTrackerCharacterCardIdentity,
+   canonicalizeGamePartySpeakerLabels,
+   collectLatestTrackerCharacterHistory,
++  mergeKnownTrackerCharacters,
+   createLocalSidecarGenerationConnection,
+   extractImageAttachmentDataUrls,
+   appendNonLeadingSystemMessagesToLastUser,
+@@ -3974,10 +3975,16 @@ export async function generateRoutes(app: FastifyInstance) {
+         const committedSnapshots = await gameStateStore.getCommittedForMessages(
+           agentSlice.filter((m: any) => m.role === "assistant"),
+         );
++        const knownTrackerCharacters = parseJsonField<Array<Record<string, unknown>>>(
++          latestGameState?.knownCharacters,
++          [],
++        );
+         const characterTrackerHistory = resolvedAgents.some((agent) => agent.type === "character-tracker")
+-          ? collectLatestTrackerCharacterHistory(
+-              await gameStateStore.getRecent(input.chatId, 100, latestGameState?.createdAt),
+-            )
++          ? knownTrackerCharacters.length > 0
++            ? knownTrackerCharacters
++            : collectLatestTrackerCharacterHistory(
++                await gameStateStore.getRecent(input.chatId, 100, latestGameState?.createdAt),
++              )
+           : [];
+         const visibleHistorySnapshot =
+           latestGameState &&
+@@ -8761,6 +8768,7 @@ export async function generateRoutes(app: FastifyInstance) {
+                 // (character-tracker, persona-stats, quest, custom-tracker) will update
+                 // them with authoritative data in their own handler blocks below.
+                 const snapshotChars = parseJsonField<any[]>(prevSnap?.presentCharacters, []);
++                const snapshotKnownCharacters = parseJsonField<any[]>(prevSnap?.knownCharacters, []);
+                 const snapshotWorldCustomFields = normalizeWorldCustomFields(
+                   parseJsonField<unknown[]>(prevSnap?.worldCustomFields, []),
+                 );
+@@ -8805,6 +8813,7 @@ export async function generateRoutes(app: FastifyInstance) {
+                     temperature: newTemperature,
+                     worldCustomFields: newWorldCustomFields,
+                     presentCharacters: snapshotChars,
++                    knownCharacters: snapshotKnownCharacters,
+                     recentEvents: (gs.recentEvents as string[]) ?? [],
+                     playerStats: snapshotPlayerStats,
+                     personaStats: snapshotPersonaStats,
+@@ -8880,11 +8889,17 @@ export async function generateRoutes(app: FastifyInstance) {
+             ) {
+               try {
+                 const ctData = result.data as Record<string, unknown>;
+-                if (!Array.isArray(ctData.presentCharacters) || ctData.presentCharacters.length === 0) {
+-                  logger.debug("[generate] character-tracker emitted no presentCharacters; keeping existing snapshot");
++                const hasPresentCharacters = Array.isArray(ctData.presentCharacters);
++                const knownCharacterUpdates = Array.isArray(ctData.knownCharacterUpdates)
++                  ? (ctData.knownCharacterUpdates.filter((character): character is Record<string, unknown> =>
++                      Boolean(character && typeof character === "object" && !Array.isArray(character)),
++                    ) as Array<Record<string, unknown>>)
++                  : [];
++                if (!hasPresentCharacters && knownCharacterUpdates.length === 0) {
++                  logger.debug("[generate] character-tracker emitted no character state; keeping existing snapshot");
+                   continue;
+                 }
+-                let chars = ctData.presentCharacters as any[];
++                let chars = hasPresentCharacters ? (ctData.presentCharacters as any[]) : [];
+                 const snapBeforeUpdate = await gameStateStore.getByMessage(messageId, targetSwipeIndex);
+                 const previousCharacterSnapshot =
+                   snapBeforeUpdate ??
+@@ -8892,6 +8907,10 @@ export async function generateRoutes(app: FastifyInstance) {
+                   (allowLatestGameStateFallback ? await gameStateStore.getLatest(input.chatId) : null);
+                 const cardCharacterIds = applyTrackerCharacterCardIdentity(chars, charInfo);
+                 const oldChars = parseJsonField<any[]>(previousCharacterSnapshot?.presentCharacters, []);
++                const oldKnownCharacters = parseJsonField<Array<Record<string, unknown>>>(
++                  previousCharacterSnapshot?.knownCharacters,
++                  [],
++                );
+                 preserveTrackerCharacterUiFields(chars, oldChars);
+                 preserveTrackerCharacterUiFields(chars, characterTrackerHistory);
+                 const characterLockState = previousCharacterSnapshot
+@@ -9072,6 +9091,10 @@ export async function generateRoutes(app: FastifyInstance) {
+                         const presentCharacters = Array.isArray(lockedAvatarPatch.presentCharacters)
+                           ? lockedAvatarPatch.presentCharacters
+                           : mergedAvatarCharacters;
++                        const knownCharacters = mergeKnownTrackerCharacters(
++                          parseJsonField<Array<Record<string, unknown>>>(latestAvatarSnapshot?.knownCharacters, []),
++                          presentCharacters,
++                        );
+ 
+                         await gameStateStore.updateByMessage(
+                           messageId,
+@@ -9079,6 +9102,7 @@ export async function generateRoutes(app: FastifyInstance) {
+                           input.chatId,
+                           {
+                             presentCharacters,
++                            knownCharacters: knownCharacters as any,
+                           },
+                           undefined,
+                           { baseSnapshot: trackerBaseGameStateSnapshot },
+@@ -9095,22 +9119,35 @@ export async function generateRoutes(app: FastifyInstance) {
+                   }
+                 }
+ 
++                const retainedCharacterUpdates = mergeKnownTrackerCharacters(knownCharacterUpdates, chars);
++                applyTrackerCharacterCardIdentity(retainedCharacterUpdates, charInfo);
++                preserveTrackerCharacterUiFields(retainedCharacterUpdates, oldKnownCharacters);
++                preserveTrackerCharacterUiFields(retainedCharacterUpdates, characterTrackerHistory);
++                const knownCharacters = mergeKnownTrackerCharacters(oldKnownCharacters, retainedCharacterUpdates);
++                const trackerSnapshotPatch = {
++                  ...(hasPresentCharacters ? { presentCharacters: chars } : {}),
++                  knownCharacters: knownCharacters as any,
++                };
++
+                 const updated = await gameStateStore.updateByMessage(
+                   messageId,
+                   targetSwipeIndex,
+                   input.chatId,
+-                  {
+-                    presentCharacters: chars,
+-                  },
++                  trackerSnapshotPatch,
+                   undefined,
+                   { baseSnapshot: trackerBaseGameStateSnapshot },
+                 );
+                 logger.info(
+-                  `[generate] character-tracker: updateByMessage returned ${updated ? "ok" : "null (no snapshot)"}`,
++                  `[generate] character-tracker: updateByMessage returned ${updated ? "ok" : "null (no snapshot)"}; knownCharacters=${knownCharacters.length}`,
+                 );
+-                // Merge into the game_state SSE event for the HUD
+-                logger.debug("[game_state_patch] character-tracker: %s", chars.map((c: any) => c.name ?? c).join(", "));
+-                sendSseEvent(reply, { type: "game_state_patch", data: { presentCharacters: chars } });
++                // Only presentCharacters belongs in the HUD. knownCharacters is retained for Storyboard continuity.
++                if (hasPresentCharacters) {
++                  logger.debug(
++                    "[game_state_patch] character-tracker: %s",
++                    chars.map((c: any) => c.name ?? c).join(", "),
++                  );
++                  sendSseEvent(reply, { type: "game_state_patch", data: { presentCharacters: chars } });
++                }
+ 
+                 // Auto-populate journal: NPC encounters
+                 try {
+diff --git a/packages/server/src/routes/generate/generate-route-utils.ts b/packages/server/src/routes/generate/generate-route-utils.ts
+index db9421f46..37586c11a 100644
+--- a/packages/server/src/routes/generate/generate-route-utils.ts
++++ b/packages/server/src/routes/generate/generate-route-utils.ts
+@@ -1491,6 +1491,41 @@ export function collectLatestTrackerCharacterHistory(
+   return history;
+ }
+ 
++/**
++ * Merge Character Tracker updates into the retained character catalogue.
++ * Identity is characterId when available and otherwise a normalized name. The
++ * returned records are copies so later UI/avatar enrichment cannot mutate an
++ * older snapshot in memory.
++ */
++export function mergeKnownTrackerCharacters(
++  previousCharacters: Array<Record<string, unknown>>,
++  updates: Array<Record<string, unknown>>,
++): Array<Record<string, unknown>> {
++  const merged: Array<Record<string, unknown>> = [];
++
++  const findExistingIndex = (character: Record<string, unknown>) => {
++    const id = trackerCharacterIdKey(character);
++    const name = trackerCharacterNameKey(character);
++    return merged.findIndex((candidate) => {
++      const candidateId = trackerCharacterIdKey(candidate);
++      const candidateName = trackerCharacterNameKey(candidate);
++      return (id && candidateId === id) || (name && candidateName === name);
++    });
++  };
++
++  for (const character of [...previousCharacters, ...updates]) {
++    if (!isPlainRecord(character)) continue;
++    if (!trackerCharacterIdKey(character) && !trackerCharacterNameKey(character)) continue;
++    const index = findExistingIndex(character);
++    if (index < 0) {
++      merged.push({ ...character });
++    } else {
++      merged[index] = { ...merged[index], ...character };
++    }
++  }
++  return merged;
++}
++
+ type TrackerCharacterCardIdentity = {
+   id: string;
+   name: string;
+@@ -1703,6 +1738,7 @@ export function parseGameStateRow(row: Record<string, unknown>): GameState {
+     temperature: row.temperature as string | null,
+     worldCustomFields: normalizeWorldCustomFields(parseJsonField<unknown[]>(row.worldCustomFields, [])),
+     presentCharacters: parseJsonField<any[]>(row.presentCharacters, []),
++    knownCharacters: parseJsonField<any[]>(row.knownCharacters, []),
+     recentEvents: parseJsonField<string[]>(row.recentEvents, []),
+     playerStats: parseJsonField<PlayerStats | null>(row.playerStats, null),
+     personaStats: parseJsonField<any[] | null>(row.personaStats, null),
+diff --git a/packages/server/src/routes/generate/retry-agents-route.ts b/packages/server/src/routes/generate/retry-agents-route.ts
+index 1e304efcc..934212b6d 100644
+--- a/packages/server/src/routes/generate/retry-agents-route.ts
++++ b/packages/server/src/routes/generate/retry-agents-route.ts
+@@ -126,8 +126,10 @@ import {
+   buildLockedPersonaTrackerPatch,
+   applyTrackerCharacterCardIdentity,
+   collectLatestTrackerCharacterHistory,
++  mergeKnownTrackerCharacters,
+   isMessageHiddenFromAI,
+   parseExtra,
++  parseJsonField,
+   parseStoredGenerationParameters,
+   parseGameStateRow,
+   parseSnapshotPlayerStats,
+@@ -863,10 +865,16 @@ async function buildRetryAgentContext(args: {
+   const retryVisibleHistorySnapshot = retryVisibleAnchor
+     ? await gameStateStore.getByChatAndMessage(chatId, retryVisibleAnchor.messageId, retryVisibleAnchor.swipeIndex)
+     : null;
++  const knownTrackerCharacters = parseJsonField<Array<Record<string, unknown>>>(
++    retryVisibleHistorySnapshot?.knownCharacters,
++    [],
++  );
+   const characterTrackerHistory = resolvedAgentTypes.has("character-tracker")
+-    ? collectLatestTrackerCharacterHistory(
+-        await gameStateStore.getRecent(chatId, 100, retryVisibleHistorySnapshot?.createdAt),
+-      )
++    ? knownTrackerCharacters.length > 0
++      ? knownTrackerCharacters
++      : collectLatestTrackerCharacterHistory(
++          await gameStateStore.getRecent(chatId, 100, retryVisibleHistorySnapshot?.createdAt),
++        )
+     : [];
+   const retryOwnerSpatialProjection = retryVisibleAnchor
+     ? ((await resolveOwnerSpatialProjection(chatId, { exactAnchor: retryVisibleAnchor }, chatMeta)) ??
+@@ -2860,11 +2868,17 @@ async function applyRetryResultEffects(args: {
+     ) {
+       try {
+         const ctData = result.data as Record<string, unknown>;
+-        if (!Array.isArray(ctData.presentCharacters) || ctData.presentCharacters.length === 0) {
+-          logger.debug("[retry-agents] character-tracker emitted no presentCharacters; keeping existing snapshot");
++        const hasPresentCharacters = Array.isArray(ctData.presentCharacters);
++        const knownCharacterUpdates = Array.isArray(ctData.knownCharacterUpdates)
++          ? (ctData.knownCharacterUpdates.filter((character): character is Record<string, unknown> =>
++              Boolean(character && typeof character === "object" && !Array.isArray(character)),
++            ) as Array<Record<string, unknown>>)
++          : [];
++        if (!hasPresentCharacters && knownCharacterUpdates.length === 0) {
++          logger.debug("[retry-agents] character-tracker emitted no character state; keeping existing snapshot");
+           continue;
+         }
+-        let presentCharacters = ctData.presentCharacters as any[];
++        let presentCharacters = hasPresentCharacters ? (ctData.presentCharacters as any[]) : [];
+         const previousSnapshot = await loadRetryTargetGameStateSnapshot();
+         assertRetryActive();
+         let previousCharacters: any[] = [];
+@@ -2879,6 +2893,10 @@ async function applyRetryResultEffects(args: {
+             previousCharacters = [];
+           }
+         }
++        const previousKnownCharacters = parseJsonField<Array<Record<string, unknown>>>(
++          previousSnapshot?.knownCharacters,
++          [],
++        );
+         applyTrackerCharacterCardIdentity(presentCharacters, agentContext.characters);
+         preserveTrackerCharacterUiFields(presentCharacters, previousCharacters);
+         preserveTrackerCharacterUiFields(
+@@ -2892,9 +2910,22 @@ async function applyRetryResultEffects(args: {
+         presentCharacters = Array.isArray(lockedCharacterPatch.presentCharacters)
+           ? lockedCharacterPatch.presentCharacters
+           : presentCharacters;
+-        await updateRetryTargetGameStateSnapshot({ presentCharacters });
++        const retainedCharacterUpdates = mergeKnownTrackerCharacters(knownCharacterUpdates, presentCharacters);
++        applyTrackerCharacterCardIdentity(retainedCharacterUpdates, agentContext.characters);
++        preserveTrackerCharacterUiFields(retainedCharacterUpdates, previousKnownCharacters);
++        preserveTrackerCharacterUiFields(
++          retainedCharacterUpdates,
++          (agentContext.characterTrackerHistory ?? []) as unknown as Array<Record<string, unknown>>,
++        );
++        const knownCharacters = mergeKnownTrackerCharacters(previousKnownCharacters, retainedCharacterUpdates);
++        await updateRetryTargetGameStateSnapshot({
++          ...(hasPresentCharacters ? { presentCharacters } : {}),
++          knownCharacters,
++        });
+         assertRetryActive();
+-        sendSseEvent(reply, { type: "game_state_patch", data: { presentCharacters } });
++        if (hasPresentCharacters) {
++          sendSseEvent(reply, { type: "game_state_patch", data: { presentCharacters } });
++        }
+       } catch (err) {
+         assertRetryActive();
+         logger.error(err, "[retry-agents] Failed to apply character-tracker update");
+diff --git a/packages/server/src/services/agents/agent-executor.ts b/packages/server/src/services/agents/agent-executor.ts
+index 5a7ca57b2..a3be6fb98 100644
+--- a/packages/server/src/services/agents/agent-executor.ts
++++ b/packages/server/src/services/agents/agent-executor.ts
+@@ -2946,6 +2946,14 @@ function buildAgentExtras(
+     parts.push(`</character_tracker_history>`);
+   }
+ 
++  if (agentTypes.includes("character-tracker")) {
++    parts.push(`<character_tracker_known_updates_contract>`);
++    parts.push(
++      'Alongside "presentCharacters", return "knownCharacterUpdates": an array of complete Character Tracker records for every character whose visual or personal state was introduced or changed anywhere in the latest assistant response. Include a character even if they leave before the response ends; do not include a character merely because they were mentioned. Keep "presentCharacters" limited to the final scene. Use [] when there are no retained-state updates.',
++    );
++    parts.push(`</character_tracker_known_updates_contract>`);
++  }
++
+   if (agentTypes.includes("illustrator") && gameImageStylePrompt) {
+     parts.push(`<game_image_instructions>`);
+     parts.push(
+diff --git a/packages/server/src/services/storage/game-state.storage.ts b/packages/server/src/services/storage/game-state.storage.ts
+index fc8e8c67c..1aea46604 100644
+--- a/packages/server/src/services/storage/game-state.storage.ts
++++ b/packages/server/src/services/storage/game-state.storage.ts
+@@ -35,6 +35,7 @@ type GameStateUpdateFields = Partial<
+     | "temperature"
+     | "worldCustomFields"
+     | "presentCharacters"
++    | "knownCharacters"
+     | "playerStats"
+     | "personaStats"
+     | "fieldLocks"
+@@ -54,6 +55,7 @@ type LockMigrationStateSource = {
+   temperature?: unknown;
+   worldCustomFields?: unknown;
+   presentCharacters?: unknown;
++  knownCharacters?: unknown;
+   recentEvents?: unknown;
+   playerStats?: unknown;
+   personaStats?: unknown;
+@@ -123,6 +125,7 @@ function buildLockMigrationState(row: LockMigrationStateSource): GameState {
+     temperature: coerceGameStateTextValue(row.temperature),
+     worldCustomFields: normalizeWorldCustomFields(parseSnapshotJson(row.worldCustomFields, [])),
+     presentCharacters: parseSnapshotJson(row.presentCharacters, []),
++    knownCharacters: parseSnapshotJson(row.knownCharacters, []),
+     recentEvents: parseSnapshotJson(row.recentEvents, []),
+     playerStats: parseSnapshotJson(row.playerStats, null),
+     personaStats: parseSnapshotJson(row.personaStats, null),
+@@ -349,6 +352,7 @@ export function createGameStateStorage(db: DB) {
+         ...coerceSnapshotTextFields(state),
+         worldCustomFields: JSON.stringify(normalizeWorldCustomFields(state.worldCustomFields)),
+         presentCharacters: JSON.stringify(state.presentCharacters),
++        knownCharacters: JSON.stringify(state.knownCharacters ?? []),
+         recentEvents: JSON.stringify(state.recentEvents),
+         playerStats: state.playerStats ? JSON.stringify(state.playerStats) : null,
+         personaStats: state.personaStats ? JSON.stringify(state.personaStats) : null,
+@@ -428,6 +432,11 @@ export function createGameStateStorage(db: DB) {
+             ? JSON.parse(latest.presentCharacters)
+             : latest.presentCharacters
+           : [],
++        knownCharacters: latest?.knownCharacters
++          ? typeof latest.knownCharacters === "string"
++            ? JSON.parse(latest.knownCharacters)
++            : latest.knownCharacters
++          : [],
+         recentEvents: latest?.recentEvents
+           ? typeof latest.recentEvents === "string"
+             ? JSON.parse(latest.recentEvents)
+@@ -460,6 +469,7 @@ export function createGameStateStorage(db: DB) {
+       if (fields.worldCustomFields !== undefined)
+         baseState.worldCustomFields = normalizeWorldCustomFields(fields.worldCustomFields);
+       if (fields.presentCharacters !== undefined) baseState.presentCharacters = fields.presentCharacters as any;
++      if (fields.knownCharacters !== undefined) baseState.knownCharacters = fields.knownCharacters as any;
+       if (fields.playerStats !== undefined) baseState.playerStats = fields.playerStats as any;
+       if (fields.personaStats !== undefined) baseState.personaStats = fields.personaStats as any;
+       if (fields.fieldLocks !== undefined) {
+@@ -497,6 +507,7 @@ export function createGameStateStorage(db: DB) {
+       if (fields.worldCustomFields !== undefined)
+         updates.worldCustomFields = JSON.stringify(normalizeWorldCustomFields(fields.worldCustomFields));
+       if (fields.presentCharacters !== undefined) updates.presentCharacters = JSON.stringify(fields.presentCharacters);
++      if (fields.knownCharacters !== undefined) updates.knownCharacters = JSON.stringify(fields.knownCharacters);
+       if (fields.playerStats !== undefined)
+         updates.playerStats = fields.playerStats ? JSON.stringify(fields.playerStats) : null;
+       if (fields.personaStats !== undefined)
+diff --git a/packages/shared/src/types/game-state.ts b/packages/shared/src/types/game-state.ts
+index 93158fc04..c30281a6d 100644
+--- a/packages/shared/src/types/game-state.ts
++++ b/packages/shared/src/types/game-state.ts
+@@ -24,6 +24,12 @@ export interface GameState {
+ 
+   // ── Characters ──
+   presentCharacters: PresentCharacter[];
++  /**
++   * Latest known state for every character the Character Tracker has observed.
++   * This is retained for continuity and Storyboard only; it does not imply the
++   * character is present in this snapshot's final scene.
++   */
++  knownCharacters?: PresentCharacter[];
+ 
+   // ── Events ──
+   recentEvents: string[];
+diff --git a/scripts/regressions/prompt.regression.ts b/scripts/regressions/prompt.regression.ts
+index ab4316031..87d96f337 100644
+--- a/scripts/regressions/prompt.regression.ts
++++ b/scripts/regressions/prompt.regression.ts
+@@ -741,6 +741,7 @@ import {
+   buildLockedInventoryTrackerPatch,
+   appendSeparateAgentInjectionMessage,
+   collectLatestTrackerCharacterHistory,
++  mergeKnownTrackerCharacters,
+   computeSummaryHideIds,
+   formatSeparateAgentInjection,
+   getMessageHiddenFromAICharacterIds,
+@@ -10585,6 +10586,50 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
+           ]),
+         },
+       ]);
++      const knownCharacters = mergeKnownTrackerCharacters(
++        [
++          {
++            characterId: "mira-card",
++            name: "Mira",
++            appearance: "Dark hair",
++            outfit: "Blue coat",
++            mood: "Calm",
++          },
++        ],
++        [
++          {
++            characterId: "mira-card",
++            name: "Mira",
++            outfit: "Rain-soaked blue coat",
++            mood: "Alarmed",
++          },
++          {
++            characterId: "guard-1",
++            name: "Gate Guard",
++            appearance: "Tall, silver helmet",
++            outfit: "Steel mail",
++          },
++        ],
++      );
++      assert.deepEqual(
++        knownCharacters,
++        [
++          {
++            characterId: "mira-card",
++            name: "Mira",
++            appearance: "Dark hair",
++            outfit: "Rain-soaked blue coat",
++            mood: "Alarmed",
++          },
++          {
++            characterId: "guard-1",
++            name: "Gate Guard",
++            appearance: "Tall, silver helmet",
++            outfit: "Steel mail",
++          },
++        ],
++        "known-character updates must retain absent characters and replace only the fields that changed",
++      );
+       const returningCharacters: Array<Record<string, unknown>> = [
+         {
+           characterId: "Mira",
+@@ -10975,6 +11020,8 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
+       assert.match(system, /<character_tracker_history>/u);
+       assert.match(system, /this list does not mean everyone is present now/u);
+       assert.match(system, /"value":72/u);
++      assert.match(system, /<character_tracker_known_updates_contract>/u);
++      assert.match(system, /"knownCharacterUpdates"/u);
+     },
+   },
+   {
