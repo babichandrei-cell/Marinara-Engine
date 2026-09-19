@@ -2946,6 +2946,22 @@ function buildAgentExtras(
     parts.push(`</character_tracker_history>`);
   }
 
+  if (agentTypes.includes("character-tracker")) {
+    parts.push(`<character_tracker_known_updates_contract>`);
+    parts.push(
+      'Alongside "presentCharacters", return "knownCharacterUpdates": an array of complete Character Tracker records for every character whose visual or personal state was introduced or changed anywhere in the latest assistant response. Include a character even if they leave before the response ends; do not include a character merely because they were mentioned. Keep "presentCharacters" limited to the final scene. Use [] when there are no retained-state updates.',
+    );
+    parts.push(`</character_tracker_known_updates_contract>`);
+  }
+
+  if (agentTypes.includes("custom-tracker")) {
+    parts.push("<custom_tracker_known_scene_updates_contract>");
+    parts.push(
+      'Alongside "fields", return "knownSceneStateUpdates": an array of complete { setting, fields } records for every established visual scene whose Custom Tracker state was introduced or changed anywhere in the latest assistant response. "setting" must exactly match that record\'s non-empty Setting field and "fields" must contain the complete Custom Tracker field array for that scene. Include an earlier scene even if the response ends elsewhere. Keep "fields" limited to the final current scene. Use [] when no additional scene state must be retained. Do not emit a scene record without an established non-empty Setting.',
+    );
+    parts.push("</custom_tracker_known_scene_updates_contract>");
+  }
+
   if (agentTypes.includes("illustrator") && gameImageStylePrompt) {
     parts.push(`<game_image_instructions>`);
     parts.push(

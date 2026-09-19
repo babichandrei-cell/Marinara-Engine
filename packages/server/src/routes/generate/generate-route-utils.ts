@@ -20,6 +20,7 @@ import {
   type GenerationParameterSendMap,
   type GenerationParameters,
   type InventoryTrackerRow,
+  type KnownCustomTrackerScene,
   type MacroContext,
   type PlayerStats,
   type WrapFormat,
@@ -1491,6 +1492,118 @@ export function collectLatestTrackerCharacterHistory(
   return history;
 }
 
+/**
+ * Merge Character Tracker updates into the retained character catalogue.
+ * Identity is characterId when available and otherwise a normalized name. The
+ * returned records are copies so later UI/avatar enrichment cannot mutate an
+ * older snapshot in memory.
+ */
+export function mergeKnownTrackerCharacters(
+  previousCharacters: Array<Record<string, unknown>>,
+  updates: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  const merged: Array<Record<string, unknown>> = [];
+
+  const findExistingIndex = (character: Record<string, unknown>) => {
+    const id = trackerCharacterIdKey(character);
+    const name = trackerCharacterNameKey(character);
+    return merged.findIndex((candidate) => {
+      const candidateId = trackerCharacterIdKey(candidate);
+      const candidateName = trackerCharacterNameKey(candidate);
+      return (id && candidateId === id) || (name && candidateName === name);
+    });
+  };
+
+  for (const character of [...previousCharacters, ...updates]) {
+    if (!isPlainRecord(character)) continue;
+    if (!trackerCharacterIdKey(character) && !trackerCharacterNameKey(character)) continue;
+    const index = findExistingIndex(character);
+    if (index < 0) {
+      merged.push({ ...character });
+    } else {
+      merged[index] = { ...merged[index], ...character };
+    }
+  }
+  return merged;
+}
+
+function normalizedCustomTrackerSceneSetting(value: unknown): string {
+  return typeof value === "string" ? normalizeTextForMatch(value) : "";
+}
+
+function normalizeKnownCustomTrackerScene(value: unknown): KnownCustomTrackerScene | null {
+  if (!isPlainRecord(value) || typeof value.setting !== "string" || !Array.isArray(value.fields)) return null;
+  const setting = value.setting.trim();
+  if (!normalizedCustomTrackerSceneSetting(setting)) return null;
+  const fields = value.fields.flatMap((field) => {
+    if (!isPlainRecord(field) || typeof field.name !== "string" || typeof field.value !== "string") return [];
+    const name = field.name.trim();
+    return name ? [{ name, value: field.value, ...(typeof field.locked === "boolean" ? { locked: field.locked } : {}) }] : [];
+  });
+  return fields.length ? { setting, fields } : null;
+}
+
+function mergeKnownCustomTrackerSceneFields(
+  previousFields: KnownCustomTrackerScene["fields"],
+  updates: KnownCustomTrackerScene["fields"],
+): KnownCustomTrackerScene["fields"] {
+  const fields: KnownCustomTrackerScene["fields"] = [];
+  const indexByName = new Map<string, number>();
+  for (const field of [...previousFields, ...updates]) {
+    const key = normalizeTextForMatch(field.name);
+    if (!key) continue;
+    const index = indexByName.get(key);
+    if (index === undefined) {
+      indexByName.set(key, fields.length);
+      fields.push({ ...field });
+    } else {
+      fields[index] = { ...fields[index], ...field };
+    }
+  }
+  return fields;
+}
+
+/**
+ * Retain the most recent complete Custom Tracker state per established Setting.
+ * Entries without a setting are ignored because they cannot be safely attached
+ * to a storyboard keyframe.
+ */
+export function mergeKnownCustomTrackerScenes(
+  previousScenes: unknown[],
+  updates: unknown[],
+): KnownCustomTrackerScene[] {
+  const scenes: KnownCustomTrackerScene[] = [];
+  const indexBySetting = new Map<string, number>();
+  for (const candidate of [...previousScenes, ...updates]) {
+    const scene = normalizeKnownCustomTrackerScene(candidate);
+    if (!scene) continue;
+    const key = normalizedCustomTrackerSceneSetting(scene.setting);
+    const index = indexBySetting.get(key);
+    if (index === undefined) {
+      indexBySetting.set(key, scenes.length);
+      scenes.push({ setting: scene.setting, fields: scene.fields.map((field) => ({ ...field })) });
+    } else {
+      const prior = scenes[index]!;
+      scenes[index] = {
+        setting: scene.setting,
+        fields: mergeKnownCustomTrackerSceneFields(prior.fields, scene.fields),
+      };
+    }
+  }
+  return scenes;
+}
+
+export function customTrackerSceneFromFields(value: unknown): KnownCustomTrackerScene | null {
+  if (!Array.isArray(value)) return null;
+  const fields = value.flatMap((field) => {
+    if (!isPlainRecord(field) || typeof field.name !== "string" || typeof field.value !== "string") return [];
+    const name = field.name.trim();
+    return name ? [{ name, value: field.value, ...(typeof field.locked === "boolean" ? { locked: field.locked } : {}) }] : [];
+  });
+  const setting = fields.find((field) => normalizedCustomTrackerSceneSetting(field.name) === "setting")?.value?.trim();
+  return setting && fields.length ? { setting, fields } : null;
+}
+
 type TrackerCharacterCardIdentity = {
   id: string;
   name: string;
@@ -1703,6 +1816,8 @@ export function parseGameStateRow(row: Record<string, unknown>): GameState {
     temperature: row.temperature as string | null,
     worldCustomFields: normalizeWorldCustomFields(parseJsonField<unknown[]>(row.worldCustomFields, [])),
     presentCharacters: parseJsonField<any[]>(row.presentCharacters, []),
+    knownCharacters: parseJsonField<any[]>(row.knownCharacters, []),
+    knownCustomTrackerScenes: parseJsonField<any[]>(row.knownCustomTrackerScenes, []),
     recentEvents: parseJsonField<string[]>(row.recentEvents, []),
     playerStats: parseJsonField<PlayerStats | null>(row.playerStats, null),
     personaStats: parseJsonField<any[] | null>(row.personaStats, null),

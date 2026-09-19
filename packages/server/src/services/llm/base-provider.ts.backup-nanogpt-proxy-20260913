@@ -49,15 +49,7 @@ export function llmFetch(
     maxResponseBytes: 50 * 1024 * 1024,
     agentOptions:
       init?.agentOptions ??
-      ((process.env.NODE_OPTIONS ?? "").includes("--use-env-proxy") &&
-      (process.env.HTTP_PROXY ||
-        process.env.HTTPS_PROXY ||
-        process.env.http_proxy ||
-        process.env.https_proxy)
-        ? undefined
-        : requestTimeoutMs
-          ? { bodyTimeout: requestTimeoutMs, headersTimeout: requestTimeoutMs }
-          : llmAgentOptions()),
+      (requestTimeoutMs ? { bodyTimeout: requestTimeoutMs, headersTimeout: requestTimeoutMs } : llmAgentOptions()),
     bufferResponse,
     decodeCompressedResponse: init?.decodeCompressedResponse ?? bufferResponse,
   });

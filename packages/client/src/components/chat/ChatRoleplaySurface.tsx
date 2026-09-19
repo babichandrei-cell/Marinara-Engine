@@ -1414,7 +1414,9 @@ export function ChatRoleplaySurface({
   const chatBackgroundBlur = useUIStore((s) => s.chatBackgroundBlur);
   const roleplayReducedPaintEffects = useUIStore((s) => s.roleplayReducedPaintEffects);
   const queryClient = useQueryClient();
-  const automaticStoryboardMessageRef = useRef<string | undefined>(undefined);
+  // undefined means the initial chat contents have not loaded yet; null means
+  // they loaded without an assistant reply, so the next reply is a new turn.
+  const automaticStoryboardMessageRef = useRef<string | null | undefined>(undefined);
   const initialLoadSettledRef = useRef(false);
   const prevMessageKeysRef = useRef<Set<string>>(new Set());
   const seenMessageKeysRef = useRef(roleplayNotificationSeenKeys);
@@ -1745,11 +1747,14 @@ export function ChatRoleplaySurface({
 
   useEffect(() => {
     const messageId = latestStoryboardMessage?.id;
-    if (!messageId) return;
     if (automaticStoryboardMessageRef.current === undefined) {
-      automaticStoryboardMessageRef.current = messageId;
-      return;
+      if (isLoading || messages === undefined) return;
+      automaticStoryboardMessageRef.current = messageId ?? null;
+      // Do not generate a historical reply merely because its chat was opened.
+      // An empty initial chat stays armed for its first genuinely new reply.
+      if (messageId) return;
     }
+    if (!messageId) return;
     if (automaticStoryboardMessageRef.current === messageId) return;
     if (!storyboardAgentActive || roleplayStoryboardAutoMode === "manual") {
       automaticStoryboardMessageRef.current = messageId;
@@ -1784,6 +1789,8 @@ export function ChatRoleplaySurface({
     generateRoleplayStoryboard,
     isStreaming,
     latestStoryboardMessage,
+    isLoading,
+    messages,
     roleplayStoryboardAutoMode,
     storyboardAgentActive,
     storeGeneratedStoryboard,

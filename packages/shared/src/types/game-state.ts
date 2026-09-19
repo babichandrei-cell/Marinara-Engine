@@ -24,6 +24,17 @@ export interface GameState {
 
   // ── Characters ──
   presentCharacters: PresentCharacter[];
+  /**
+   * Latest known state for every character the Character Tracker has observed.
+   * This is retained for continuity and Storyboard only; it does not imply the
+   * character is present in this snapshot's final scene.
+   */
+  knownCharacters?: PresentCharacter[];
+  /**
+   * Latest known visual state for each Custom Tracker scene. Retained for
+   * Storyboard continuity only; it does not change the current HUD fields.
+   */
+  knownCustomTrackerScenes?: KnownCustomTrackerScene[];
 
   // ── Events ──
   recentEvents: string[];
@@ -102,6 +113,12 @@ export interface CustomTrackerField {
   value: string;
   /** @deprecated Use GameState.fieldLocks for persisted per-cell tracker locks. */
   locked?: boolean;
+}
+
+/** A retained full Custom Tracker state, keyed by its non-empty Setting field. */
+export interface KnownCustomTrackerScene {
+  setting: string;
+  fields: CustomTrackerField[];
 }
 
 /** A concise row maintained by the dedicated roleplay Inventory Tracker. */

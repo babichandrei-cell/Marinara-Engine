@@ -24,15 +24,6 @@ services:
       - FILE_STORAGE_DIR=/app/data/storage
       - MARINARA_DOCKER=true
 
-      # Outbound proxy for NanoGPT via host Xray
-      - HTTP_PROXY=http://172.18.0.1:10819
-      - HTTPS_PROXY=http://172.18.0.1:10819
-      - http_proxy=http://172.18.0.1:10819
-      - https_proxy=http://172.18.0.1:10819
-      - NO_PROXY=localhost,127.0.0.1,172.17.0.1,172.18.0.1,host.docker.internal
-      - no_proxy=localhost,127.0.0.1,172.17.0.1,172.18.0.1,host.docker.internal
-      - NODE_OPTIONS=--use-env-proxy
-
       - AUTO_CREATE_DEFAULT_CONNECTION=${AUTO_CREATE_DEFAULT_CONNECTION:-true}
       - TRUSTED_HOSTS=${TRUSTED_HOSTS:-}
       - CORS_ORIGINS=${CORS_ORIGINS:-}

@@ -741,6 +741,9 @@ import {
   buildLockedInventoryTrackerPatch,
   appendSeparateAgentInjectionMessage,
   collectLatestTrackerCharacterHistory,
+  mergeKnownTrackerCharacters,
+  mergeKnownCustomTrackerScenes,
+  customTrackerSceneFromFields,
   computeSummaryHideIds,
   formatSeparateAgentInjection,
   getMessageHiddenFromAICharacterIds,
@@ -3786,6 +3789,16 @@ const cases: RegressionCase[] = [
       const automaticStoryboardEffectSource = roleplaySurfaceSource.slice(
         automaticStoryboardEffectStart,
         automaticStoryboardEffectEnd,
+      );
+      assert.match(
+        roleplaySurfaceSource,
+        /automaticStoryboardMessageRef\s*=\s*useRef<string\s*\|\s*null\s*\|\s*undefined>\(undefined\)/u,
+        "Automatic Storyboard state should distinguish an unloaded chat from an initially empty chat",
+      );
+      assert.match(
+        automaticStoryboardEffectSource,
+        /if \(isLoading \|\| messages === undefined\) return;[\s\S]*automaticStoryboardMessageRef\.current = messageId \?\? null;[\s\S]*if \(messageId\) return;/u,
+        "Automatic Storyboard should arm an empty initial chat while skipping a reply that already existed on open",
       );
       const automaticBusyGuardStart = automaticStoryboardEffectSource.indexOf("if (\n      isStreaming ||");
       const automaticTriggerStart = automaticStoryboardEffectSource.indexOf(
@@ -10585,6 +10598,113 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
           ]),
         },
       ]);
+      const knownCharacters = mergeKnownTrackerCharacters(
+        [
+          {
+            characterId: "mira-card",
+            name: "Mira",
+            appearance: "Dark hair",
+            outfit: "Blue coat",
+            mood: "Calm",
+          },
+        ],
+        [
+          {
+            characterId: "mira-card",
+            name: "Mira",
+            outfit: "Rain-soaked blue coat",
+            mood: "Alarmed",
+          },
+          {
+            characterId: "guard-1",
+            name: "Gate Guard",
+            appearance: "Tall, silver helmet",
+            outfit: "Steel mail",
+          },
+        ],
+      );
+      assert.deepEqual(
+        knownCharacters,
+        [
+          {
+            characterId: "mira-card",
+            name: "Mira",
+            appearance: "Dark hair",
+            outfit: "Rain-soaked blue coat",
+            mood: "Alarmed",
+          },
+          {
+            characterId: "guard-1",
+            name: "Gate Guard",
+            appearance: "Tall, silver helmet",
+            outfit: "Steel mail",
+          },
+        ],
+        "known-character updates must retain absent characters and replace only the fields that changed",
+      );
+      const knownCustomTrackerScenes = mergeKnownCustomTrackerScenes(
+        [
+          {
+            setting: "The Archive",
+            fields: [
+              { name: "Setting", value: "The Archive" },
+              { name: "Environment", value: "Brass shelves; locked cabinet" },
+              { name: "Visible Objects", value: "Atlas — on central table" },
+            ],
+          },
+        ],
+        [
+          {
+            setting: "The Archive",
+            fields: [
+              { name: "Setting", value: "The Archive" },
+              { name: "Visible Objects", value: "Atlas — carried by Mira" },
+            ],
+          },
+          {
+            setting: "Rainy Courtyard",
+            fields: [
+              { name: "Setting", value: "Rainy Courtyard" },
+              { name: "Environment", value: "Stone fountain; iron gate" },
+            ],
+          },
+        ],
+      );
+      assert.deepEqual(
+        knownCustomTrackerScenes,
+        [
+          {
+            setting: "The Archive",
+            fields: [
+              { name: "Setting", value: "The Archive" },
+              { name: "Environment", value: "Brass shelves; locked cabinet" },
+              { name: "Visible Objects", value: "Atlas — carried by Mira" },
+            ],
+          },
+          {
+            setting: "Rainy Courtyard",
+            fields: [
+              { name: "Setting", value: "Rainy Courtyard" },
+              { name: "Environment", value: "Stone fountain; iron gate" },
+            ],
+          },
+        ],
+        "known Custom Tracker scenes must retain prior settings and update only the changed fields",
+      );
+      assert.deepEqual(
+        customTrackerSceneFromFields([
+          { name: "Scene Style", value: "Victorian occult" },
+          { name: "Setting", value: "The Archive" },
+        ]),
+        {
+          setting: "The Archive",
+          fields: [
+            { name: "Scene Style", value: "Victorian occult" },
+            { name: "Setting", value: "The Archive" },
+          ],
+        },
+        "the final Custom Tracker fields must become a retained scene when Setting is present",
+      );
       const returningCharacters: Array<Record<string, unknown>> = [
         {
           characterId: "Mira",
@@ -10975,6 +11095,26 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
       assert.match(system, /<character_tracker_history>/u);
       assert.match(system, /this list does not mean everyone is present now/u);
       assert.match(system, /"value":72/u);
+      assert.match(system, /<character_tracker_known_updates_contract>/u);
+      assert.match(system, /"knownCharacterUpdates"/u);
+    },
+  },
+  {
+    name: "custom tracker receives retained scene-state output contract",
+    async run() {
+      const { calls, provider } = makeCapturingProvider('{"fields":[]}');
+      const config = makeRegressionAgentConfig({
+        id: "builtin:custom-tracker",
+        type: "custom-tracker",
+        name: "Custom Tracker",
+        promptTemplate: "Track the final scene fields as JSON.",
+        settings: { resultType: "custom_tracker_update" },
+      });
+      await executeAgent(config as any, makeRegressionAgentContext(), provider as any, "regression-model");
+      const system = calls[0]?.[0]?.content ?? "";
+      assert.match(system, /<custom_tracker_known_scene_updates_contract>/u);
+      assert.match(system, /"knownSceneStateUpdates"/u);
+      assert.match(system, /earlier scene even if the response ends elsewhere/u);
     },
   },
   {

@@ -20,6 +20,10 @@ export const gameStateSnapshots = fileTable("game_state_snapshots", {
 
   /** JSON array of PresentCharacter objects */
   presentCharacters: text("present_characters").notNull().default("[]"),
+  /** JSON array of the latest known Character Tracker states, including absent characters. */
+  knownCharacters: text("known_characters").notNull().default("[]"),
+  /** JSON array of retained Custom Tracker scene states for Storyboard continuity. */
+  knownCustomTrackerScenes: text("known_custom_tracker_scenes").notNull().default("[]"),
   /** JSON array of recent event strings */
   recentEvents: text("recent_events").notNull().default("[]"),
   /** JSON object for player stats */

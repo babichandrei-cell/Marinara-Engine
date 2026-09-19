@@ -126,8 +126,12 @@ import {
   buildLockedPersonaTrackerPatch,
   applyTrackerCharacterCardIdentity,
   collectLatestTrackerCharacterHistory,
+  mergeKnownTrackerCharacters,
+  mergeKnownCustomTrackerScenes,
+  customTrackerSceneFromFields,
   isMessageHiddenFromAI,
   parseExtra,
+  parseJsonField,
   parseStoredGenerationParameters,
   parseGameStateRow,
   parseSnapshotPlayerStats,
@@ -863,10 +867,16 @@ async function buildRetryAgentContext(args: {
   const retryVisibleHistorySnapshot = retryVisibleAnchor
     ? await gameStateStore.getByChatAndMessage(chatId, retryVisibleAnchor.messageId, retryVisibleAnchor.swipeIndex)
     : null;
+  const knownTrackerCharacters = parseJsonField<Array<Record<string, unknown>>>(
+    retryVisibleHistorySnapshot?.knownCharacters,
+    [],
+  );
   const characterTrackerHistory = resolvedAgentTypes.has("character-tracker")
-    ? collectLatestTrackerCharacterHistory(
-        await gameStateStore.getRecent(chatId, 100, retryVisibleHistorySnapshot?.createdAt),
-      )
+    ? knownTrackerCharacters.length > 0
+      ? knownTrackerCharacters
+      : collectLatestTrackerCharacterHistory(
+          await gameStateStore.getRecent(chatId, 100, retryVisibleHistorySnapshot?.createdAt),
+        )
     : [];
   const retryOwnerSpatialProjection = retryVisibleAnchor
     ? ((await resolveOwnerSpatialProjection(chatId, { exactAnchor: retryVisibleAnchor }, chatMeta)) ??
@@ -2860,11 +2870,17 @@ async function applyRetryResultEffects(args: {
     ) {
       try {
         const ctData = result.data as Record<string, unknown>;
-        if (!Array.isArray(ctData.presentCharacters) || ctData.presentCharacters.length === 0) {
-          logger.debug("[retry-agents] character-tracker emitted no presentCharacters; keeping existing snapshot");
+        const hasPresentCharacters = Array.isArray(ctData.presentCharacters);
+        const knownCharacterUpdates = Array.isArray(ctData.knownCharacterUpdates)
+          ? (ctData.knownCharacterUpdates.filter((character): character is Record<string, unknown> =>
+              Boolean(character && typeof character === "object" && !Array.isArray(character)),
+            ) as Array<Record<string, unknown>>)
+          : [];
+        if (!hasPresentCharacters && knownCharacterUpdates.length === 0) {
+          logger.debug("[retry-agents] character-tracker emitted no character state; keeping existing snapshot");
           continue;
         }
-        let presentCharacters = ctData.presentCharacters as any[];
+        let presentCharacters = hasPresentCharacters ? (ctData.presentCharacters as any[]) : [];
         const previousSnapshot = await loadRetryTargetGameStateSnapshot();
         assertRetryActive();
         let previousCharacters: any[] = [];
@@ -2879,6 +2895,10 @@ async function applyRetryResultEffects(args: {
             previousCharacters = [];
           }
         }
+        const previousKnownCharacters = parseJsonField<Array<Record<string, unknown>>>(
+          previousSnapshot?.knownCharacters,
+          [],
+        );
         applyTrackerCharacterCardIdentity(presentCharacters, agentContext.characters);
         preserveTrackerCharacterUiFields(presentCharacters, previousCharacters);
         preserveTrackerCharacterUiFields(
@@ -2892,9 +2912,22 @@ async function applyRetryResultEffects(args: {
         presentCharacters = Array.isArray(lockedCharacterPatch.presentCharacters)
           ? lockedCharacterPatch.presentCharacters
           : presentCharacters;
-        await updateRetryTargetGameStateSnapshot({ presentCharacters });
+        const retainedCharacterUpdates = mergeKnownTrackerCharacters(knownCharacterUpdates, presentCharacters);
+        applyTrackerCharacterCardIdentity(retainedCharacterUpdates, agentContext.characters);
+        preserveTrackerCharacterUiFields(retainedCharacterUpdates, previousKnownCharacters);
+        preserveTrackerCharacterUiFields(
+          retainedCharacterUpdates,
+          (agentContext.characterTrackerHistory ?? []) as unknown as Array<Record<string, unknown>>,
+        );
+        const knownCharacters = mergeKnownTrackerCharacters(previousKnownCharacters, retainedCharacterUpdates);
+        await updateRetryTargetGameStateSnapshot({
+          ...(hasPresentCharacters ? { presentCharacters } : {}),
+          knownCharacters,
+        });
         assertRetryActive();
-        sendSseEvent(reply, { type: "game_state_patch", data: { presentCharacters } });
+        if (hasPresentCharacters) {
+          sendSseEvent(reply, { type: "game_state_patch", data: { presentCharacters } });
+        }
       } catch (err) {
         assertRetryActive();
         logger.error(err, "[retry-agents] Failed to apply character-tracker update");
@@ -3144,24 +3177,43 @@ async function applyRetryResultEffects(args: {
         const ctData = result.data as Record<string, unknown>;
         const hasFields = Array.isArray(ctData.fields);
         const rawFields = hasFields ? (ctData.fields as any[]) : [];
-        if (hasFields) {
+        const knownSceneStateUpdates = Array.isArray(ctData.knownSceneStateUpdates) ? ctData.knownSceneStateUpdates : [];
+        if (hasFields || knownSceneStateUpdates.length > 0) {
           const snap = await loadRetryTargetGameStateSnapshot();
           assertRetryActive();
-          const customTrackerPatch = buildLockedPlayerStatsArrayPatch<any>({
-            field: "customTrackerFields",
-            values: rawFields,
-            snapshot: snap,
-            lockState: snap ? parseGameStateRow(snap as Record<string, unknown>) : null,
-          });
-          if (snap && customTrackerPatch.changed) {
+          const customTrackerPatch = hasFields
+            ? buildLockedPlayerStatsArrayPatch<any>({
+                field: "customTrackerFields",
+                values: rawFields,
+                snapshot: snap,
+                lockState: snap ? parseGameStateRow(snap as Record<string, unknown>) : null,
+              })
+            : null;
+          const currentScene = customTrackerPatch
+            ? customTrackerSceneFromFields(customTrackerPatch.values)
+            : null;
+          const previousKnownScenes = parseJsonField<any[]>(snap?.knownCustomTrackerScenes, []);
+          const knownCustomTrackerScenes = mergeKnownCustomTrackerScenes(previousKnownScenes, [
+            ...knownSceneStateUpdates,
+            ...(currentScene ? [currentScene] : []),
+          ]);
+          if (
+            snap &&
+            ((customTrackerPatch?.changed ?? false) ||
+              knownSceneStateUpdates.length > 0 ||
+              knownCustomTrackerScenes.length !== previousKnownScenes.length)
+          ) {
             assertRetryActive();
             await app.db
               .update(gameStateSnapshotsTable)
-              .set({ playerStats: JSON.stringify(customTrackerPatch.playerStats) })
+              .set({
+                ...(customTrackerPatch ? { playerStats: JSON.stringify(customTrackerPatch.playerStats) } : {}),
+                knownCustomTrackerScenes: JSON.stringify(knownCustomTrackerScenes),
+              })
               .where(eq(gameStateSnapshotsTable.id, snap.id));
             assertRetryActive();
           }
-          if (customTrackerPatch.changed) {
+          if (customTrackerPatch?.changed) {
             assertRetryActive();
             sendSseEvent(reply, { type: "game_state_patch", data: customTrackerPatch.patch });
           }

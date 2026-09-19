@@ -199,6 +199,10 @@ import {
   resolveStoredModelContextLimit,
   type ModelAccessPolicy,
 } from "../services/generation/model-access-policy.js";
+import {
+  isTurnPostProcessingPending,
+  waitForTurnPostProcessing,
+} from "../services/generation/turn-post-processing-barrier.js";
 import { postToDiscordWebhook } from "../services/discord-webhook.js";
 import {
   getChatGenerationTimeoutMs,
@@ -551,17 +555,27 @@ function getStoryboardLibraryCharacterIds(
 function storyboardTrackedNpcsFromState(latestState: unknown): Array<Record<string, unknown>> {
   const latest = asStoryboardRecord(latestState);
   const presentCharacters = parseStoredJson<Array<Record<string, unknown>>>(latest.presentCharacters) ?? [];
+  const knownCharacters = parseStoredJson<Array<Record<string, unknown>>>(latest.knownCharacters) ?? [];
   const trackedNpcs: Array<Record<string, unknown>> = [];
-  for (const character of presentCharacters) {
+  const trackedNpcIndexByName = new Map<string, number>();
+  for (const character of [...knownCharacters, ...presentCharacters]) {
     const name = readTrimmedString(character.name);
     if (!name) continue;
-    trackedNpcs.push({
+    const trackedNpc = {
       name,
       description: readTrimmedString(character.appearance) ?? readTrimmedString(character.description) ?? "",
       avatarUrl: readTrimmedString(character.avatarPath) ?? readTrimmedString(character.avatarUrl),
       gender: readTrimmedString(character.gender),
       pronouns: readTrimmedString(character.pronouns),
-    });
+    };
+    const key = normalizeAvatarLookupName(name);
+    const existingIndex = trackedNpcIndexByName.get(key);
+    if (existingIndex === undefined) {
+      trackedNpcIndexByName.set(key, trackedNpcs.length);
+      trackedNpcs.push(trackedNpc);
+    } else {
+      trackedNpcs[existingIndex] = trackedNpc;
+    }
   }
   return trackedNpcs;
 }
@@ -3276,7 +3290,8 @@ const GAME_GENERATION_TIMEOUT_MS = 5 * 60 * 1000;
 const GAME_ASSET_GENERATION_TIMEOUT_MS = 45 * 60 * 1000;
 const GAME_SCENE_VIDEO_GENERATION_TIMEOUT_MS = 31 * 60 * 1000;
 const GAME_ILLUSTRATION_SUMMARY_TIMEOUT_MS = 60 * 1000;
-const GAME_STORYBOARD_ILLUSTRATOR_TIMEOUT_MS = 3 * 60 * 1000;
+const GAME_STORYBOARD_ILLUSTRATOR_TIMEOUT_MS = 6 * 60 * 1000;
+const GAME_STORYBOARD_ILLUSTRATOR_MAX_TOKENS = 8192;
 const GAME_STORYBOARD_ANIMATION_REFINEMENT_TIMEOUT_MS = 60 * 1000;
 const GAME_ASSET_PORTRAIT_CONCURRENCY = 2;
 const GAME_ASSET_REFERENCE_LOOKUP_CONCURRENCY = 4;
@@ -5676,6 +5691,9 @@ function buildStoryboardRoleplayContextBlock(args: {
 }): string {
   const latest = asStoryboardRecord(args.latestState);
   const presentCharacters = parseStoredJson<Array<Record<string, unknown>>>(latest.presentCharacters) ?? [];
+  const knownCharacters = parseStoredJson<Array<Record<string, unknown>>>(latest.knownCharacters) ?? [];
+  const knownCustomTrackerScenes =
+    parseStoredJson<Array<Record<string, unknown>>>(latest.knownCustomTrackerScenes) ?? [];
   const lines = [
     "Mode: Roleplay",
     args.spatialBreadcrumb ? `Location: ${compactStoryboardText(args.spatialBreadcrumb, 800)}` : "",
@@ -5684,6 +5702,16 @@ function buildStoryboardRoleplayContextBlock(args: {
       : "",
     presentCharacters.length
       ? `Current Character Tracker state: ${compactStoryboardText(JSON.stringify(presentCharacters.slice(0, 20)), 3000)}`
+      : "",
+    knownCharacters.length ? `known_characters_current_state: ${JSON.stringify(knownCharacters)}` : "",
+    knownCharacters.length
+      ? "Known character states are visual continuity reference only. They do not make a character present in a scene; show someone only when the episode narration or Current Character Tracker state places them there."
+      : "",
+    knownCustomTrackerScenes.length
+      ? "known_custom_tracker_scene_states: " + JSON.stringify(knownCustomTrackerScenes)
+      : "",
+    knownCustomTrackerScenes.length
+      ? "Known Custom Tracker scene states are visual continuity reference only. They do not make a setting current or a prop visible; use an entry only when the episode narration anchors the keyframe in that setting."
       : "",
   ].filter(Boolean);
   return `<roleplay_context>\n${lines.map(escapeXmlAttribute).join("\n")}\n</roleplay_context>`;
@@ -11899,10 +11927,7 @@ export async function gameRoutes(app: FastifyInstance) {
       GAME_SCENE_VIDEO_GENERATION_TIMEOUT_MS,
       "Game storyboard generation",
     );
-    let releaseStoryboardLock: (() => void) | null = await acquireGameAssetGenerationLock(
-      `storyboard:${input.chatId}`,
-      storyboardAbortSignal,
-    );
+    let releaseStoryboardLock: (() => void) | null = null;
     const storyboardStartedAt = Date.now();
     try {
       const requestDebug = input.debugMode === true;
@@ -11926,6 +11951,23 @@ export async function gameRoutes(app: FastifyInstance) {
       if (!ownerMode) {
         return reply.status(400).send({ error: "Storyboards are available only in Game and Roleplay chats." });
       }
+
+      // Roleplay Storyboard is requested by the client as soon as the assistant
+      // message appears. That happens before tracker post-processing has saved
+      // this turn's state, so an automatic run must wait on the server-side
+      // completion barrier rather than on a UI timing signal.
+      if (input.automatic && ownerMode === "roleplay") {
+        const wasPostProcessingPending = isTurnPostProcessingPending(input.chatId);
+        if (wasPostProcessingPending) {
+          logger.info("[game/storyboard] Waiting for Roleplay tracker persistence in chat %s", input.chatId);
+        }
+        await waitForTurnPostProcessing(input.chatId, storyboardAbortSignal);
+        if (wasPostProcessingPending) {
+          logger.info("[game/storyboard] Roleplay tracker persistence completed for chat %s", input.chatId);
+        }
+      }
+
+      releaseStoryboardLock = await acquireGameAssetGenerationLock(`storyboard:${input.chatId}`, storyboardAbortSignal);
 
       const message = await chats.getMessage(input.messageId);
       if (!message || message.chatId !== input.chatId) {
@@ -12122,6 +12164,23 @@ export async function gameRoutes(app: FastifyInstance) {
         (await createGameStateStorage(app.db)
           .getLatest(input.chatId)
           .catch(() => null));
+      if (ownerMode === "roleplay") {
+        const storyboardState = asStoryboardRecord(fallbackState);
+        const presentCharacterCount =
+          parseStoredJson<Array<Record<string, unknown>>>(storyboardState.presentCharacters)?.length ?? 0;
+        const knownCharacterCount =
+          parseStoredJson<Array<Record<string, unknown>>>(storyboardState.knownCharacters)?.length ?? 0;
+        const knownCustomTrackerSceneCount =
+          parseStoredJson<Array<Record<string, unknown>>>(storyboardState.knownCustomTrackerScenes)?.length ?? 0;
+        logger.info(
+          "[game/storyboard] Continuity context: presentCharacters=" +
+            presentCharacterCount +
+            ", knownCharacters=" +
+            knownCharacterCount +
+            ", knownCustomTrackerScenes=" +
+            knownCustomTrackerSceneCount,
+        );
+      }
       const charStore = createCharactersStorage(app.db);
       const storyboardCharacterContext = await buildStoryboardCharacterContext({
         characters: charStore,
@@ -12244,7 +12303,7 @@ export async function gameRoutes(app: FastifyInstance) {
               conn.model ?? "",
               {
                 stream: false,
-                maxTokens: structuredCharacterPrompts ? 3600 : 2200,
+                maxTokens: GAME_STORYBOARD_ILLUSTRATOR_MAX_TOKENS,
                 responseFormat: { type: "json_object" },
                 signal: storyboardAbortSignal,
               },
@@ -12257,8 +12316,23 @@ export async function gameRoutes(app: FastifyInstance) {
           const extraction = extractLeadingThinkingBlocks(directorResult.content || "", parameters?.customThinkingTags);
           const rawPlan = extraction.content.trim();
           if (debugLogsEnabled) debugLog("[debug/game/storyboard-illustrator] raw response:\n%s", rawPlan);
-          const parsedPlan = parseJSON(rawPlan);
+          let parsedPlan: unknown;
+          try {
+            parsedPlan = parseJSON(rawPlan);
+          } catch (err) {
+            if (isLikelyTruncatedJsonResponse(rawPlan, directorResult.finishReason)) {
+              throw new Error(
+                `Storyboard Illustrator reached its ${GAME_STORYBOARD_ILLUSTRATOR_MAX_TOKENS}-token output limit before returning a complete JSON plan. Reduce the requested keyframes or increase the planner output budget.`,
+              );
+            }
+            throw err;
+          }
           if (!storyboardPlanHasRenderableKeyframe(parsedPlan)) {
+            if (isLikelyTruncatedJsonResponse(rawPlan, directorResult.finishReason)) {
+              throw new Error(
+                `Storyboard Illustrator reached its ${GAME_STORYBOARD_ILLUSTRATOR_MAX_TOKENS}-token output limit before returning a usable JSON plan. Reduce the requested keyframes or increase the planner output budget.`,
+              );
+            }
             throw new Error("Storyboard Illustrator returned no usable keyframes");
           }
           plan = sanitizeStoryboardPlan(parsedPlan, storyboardPlanSanitizerOptions);

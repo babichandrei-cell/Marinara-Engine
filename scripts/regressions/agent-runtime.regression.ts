@@ -635,6 +635,45 @@ assert.equal(
   "Max Parallel Agent Jobs must also serialize isolated configs inside one batch group",
 );
 
+const visualAgentContexts = new Map<string, AgentContext>();
+const currentTurnVisualAgents = [
+  makeAgent("world-state"),
+  makeAgent("custom-tracker"),
+  makeAgent("character-tracker"),
+  makeAgent("illustrator"),
+  makeAgent("storyboard"),
+];
+await createAgentPipeline(
+  currentTurnVisualAgents,
+  context,
+  undefined,
+  (agent, agentContext) => {
+    if (agent.type === "illustrator" || agent.type === "storyboard") {
+      visualAgentContexts.set(agent.type, agentContext);
+    }
+    return agentContext;
+  },
+).postGenerate("Trackers must update the current turn before visual agents run.");
+
+for (const visualAgentType of ["illustrator", "storyboard"]) {
+  const agentResults = visualAgentContexts.get(visualAgentType)?.memory._agentResults as
+    | Record<string, unknown>
+    | undefined;
+  const currentTurnUpdates = agentResults?.currentTurnTrackerUpdates as
+    | { instruction?: unknown; results?: Record<string, unknown> }
+    | undefined;
+  assert.equal(
+    typeof currentTurnUpdates?.instruction,
+    "string",
+    `${visualAgentType} must receive a current-turn tracker precedence instruction`,
+  );
+  assert.deepEqual(
+    Object.keys(currentTurnUpdates?.results ?? {}).sort(),
+    ["character-tracker", "custom-tracker", "world-state"],
+    `${visualAgentType} must receive all successful tracker results from this turn`,
+  );
+}
+
 const parallelLlamaArgs = buildLlamaArgs({
   modelPath: "/tmp/model.gguf",
   gpuLayers: 0,

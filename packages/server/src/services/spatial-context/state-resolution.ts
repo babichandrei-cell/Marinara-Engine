@@ -15,12 +15,18 @@ export type AssistantSpatialDirective =
 export interface ParsedAssistantSpatialDirective {
   cleanContent: string;
   directive: AssistantSpatialDirective | null;
+  /** The known map location that is the final focal scene in a narrated continuation. */
+  sceneLocationId: string | null;
   matched: boolean;
 }
 
-const ASSISTANT_SPATIAL_COMMAND_RE = /\[spatial_(move|discover):\s*([^\]\r\n]*)\]/giu;
-const ASSISTANT_SPATIAL_COMMAND_PREFIXES = ["[spatial_move:", "[spatial_discover:"] as const;
-const ASSISTANT_SPATIAL_COMMAND_PREFIX_ONLY_RE = /^\[spatial_(?:move|discover):\s*$/iu;
+const ASSISTANT_SPATIAL_COMMAND_RE = /\[spatial_(move|discover|scene_location):\s*([^\]\r\n]*)\]/giu;
+const ASSISTANT_SPATIAL_COMMAND_PREFIXES = [
+  "[spatial_move:",
+  "[spatial_discover:",
+  "[spatial_scene_location:",
+] as const;
+const ASSISTANT_SPATIAL_COMMAND_PREFIX_ONLY_RE = /^\[spatial_(?:move|discover|scene_location):\s*$/iu;
 
 export interface AssistantSpatialDirectiveStreamFilter {
   push(content: string): string;
@@ -93,11 +99,17 @@ function parseCommandAttributes(body: string): Map<string, string> {
 /** Extract the last valid package-owned location command and hide all such commands from chat text. */
 export function extractAssistantSpatialDirective(content: string): ParsedAssistantSpatialDirective {
   let directive: AssistantSpatialDirective | null = null;
+  let sceneLocationId: string | null = null;
   let matched = false;
   for (const match of content.matchAll(ASSISTANT_SPATIAL_COMMAND_RE)) {
     matched = true;
     const command = match[1]?.toLowerCase();
     const values = parseCommandAttributes(match[2] ?? "");
+    if (command === "scene_location") {
+      const destinationId = (values.get("destination_id") ?? values.get("destination") ?? "").trim().slice(0, 128);
+      if (destinationId) sceneLocationId = destinationId;
+      continue;
+    }
     if (command === "move") {
       const destinationId = (values.get("destination_id") ?? values.get("destination") ?? "").trim().slice(0, 128);
       if (destinationId) directive = { type: "move", destinationId };
@@ -124,7 +136,7 @@ export function extractAssistantSpatialDirective(content: string): ParsedAssista
     }
   }
   if (!matched) {
-    return { cleanContent: content, directive: null, matched: false };
+    return { cleanContent: content, directive: null, sceneLocationId: null, matched: false };
   }
   return {
     cleanContent: content
@@ -132,6 +144,7 @@ export function extractAssistantSpatialDirective(content: string): ParsedAssista
       .replace(/\n{3,}/gu, "\n\n")
       .trim(),
     directive,
+    sceneLocationId,
     matched: true,
   };
 }
@@ -168,6 +181,7 @@ interface StateResolutionService {
     regenerate: boolean;
     continuation: boolean;
     directive?: AssistantSpatialDirective | null;
+    sceneLocationId?: string | null;
     locationGuidance?: string | null;
   }): Promise<SpatialContextSnapshot | null>;
 }
@@ -213,6 +227,7 @@ export async function materializeAssistantSpatialState(
     regenerate: boolean;
     continuation: boolean;
     directive?: AssistantSpatialDirective | null;
+    sceneLocationId?: string | null;
     locationGuidance?: string | null;
   },
   chatMetadata: unknown,

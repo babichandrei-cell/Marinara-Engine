@@ -28,6 +28,7 @@ import { sidecarSpeechService } from "../sidecar/sidecar-speech.service.js";
 
 const ROOT = join(DATA_DIR, "capability-packages");
 const VERSIONS = join(ROOT, "versions");
+const LOCAL_IMPORTS = join(ROOT, "local-imports");
 const REGISTRY = join(ROOT, "installed.json");
 const UPDATE_DECISIONS = join(ROOT, "update-decisions-v1.json");
 const AVAILABILITY_MIGRATION = join(ROOT, "availability-migration-v1.json");
@@ -580,7 +581,11 @@ export function findPendingCapabilityPackageUpdates(
     }));
 }
 
-async function installCatalogPackage(entry: CapabilityCatalogPackage, activateDuringStartup = false) {
+async function installCatalogPackage(
+  entry: CapabilityCatalogPackage,
+  activateDuringStartup = false,
+  archiveOverride?: Buffer,
+) {
   const { manifest, artifact } = entry;
   const installIssue = getCapabilityPackageInstallIssue(manifest);
   if (installIssue) throw new Error(installIssue);
@@ -591,10 +596,12 @@ async function installCatalogPackage(entry: CapabilityCatalogPackage, activateDu
   if (!supportsEngineVersion(entry, APP_VERSION)) {
     throw new Error(`Package requires Marinara Engine ${manifest.engine.min} to below ${manifest.engine.maxExclusive}`);
   }
-  const archive = await fetchBytes(artifact.url, Math.min(artifact.bytes + 1, MAX_ARTIFACT_BYTES));
-  if (archive.byteLength !== artifact.bytes) throw new Error("Downloaded package size does not match the catalog");
-  const digest = createHash("sha256").update(archive).digest("hex");
-  if (digest !== artifact.sha256) throw new Error("Downloaded package checksum does not match the catalog");
+  const archive = archiveOverride ?? (await fetchBytes(artifact.url, Math.min(artifact.bytes + 1, MAX_ARTIFACT_BYTES)));
+  if (!archiveOverride) {
+    if (archive.byteLength !== artifact.bytes) throw new Error("Downloaded package size does not match the catalog");
+    const digest = createHash("sha256").update(archive).digest("hex");
+    if (digest !== artifact.sha256) throw new Error("Downloaded package checksum does not match the catalog");
+  }
 
   const zip = new AdmZip(archive);
   const entries = validatePackageArchiveEntries(zip);
@@ -1143,6 +1150,35 @@ export const capabilityPackageManager = {
       );
     }
     return installCatalogPackage(entry);
+  },
+
+  /** Trusted local-package path. It is deliberately not exposed over HTTP. */
+  async installLocalArtifact(filename: string) {
+    const name = filename.trim();
+    if (!name || name.includes("/") || name.includes("\\") || !name.toLowerCase().endsWith(".zip")) {
+      throw new Error("Local capability artifact filename is invalid");
+    }
+    const archive = await readFile(inside(LOCAL_IMPORTS, join(LOCAL_IMPORTS, name)));
+    if (archive.byteLength > MAX_ARTIFACT_BYTES) throw new Error("Package artifact is too large");
+    const entries = validatePackageArchiveEntries(new AdmZip(archive));
+    const manifestEntry = entries.find((item) => item.entryName === "manifest.json");
+    if (!manifestEntry || manifestEntry.header.size > MAX_MANIFEST_BYTES) {
+      throw new Error("Package manifest is missing or too large");
+    }
+    const manifest = capabilityPackageManifestSchema.parse(JSON.parse(manifestEntry.getData().toString("utf8")));
+    return installCatalogPackage(
+      {
+        category: "misc",
+        manifest,
+        artifact: {
+          url: "https://local.invalid/capability-package.zip",
+          sha256: createHash("sha256").update(archive).digest("hex"),
+          bytes: archive.byteLength,
+        },
+      },
+      false,
+      archive,
+    );
   },
 
   async uninstall(packageId: string) {

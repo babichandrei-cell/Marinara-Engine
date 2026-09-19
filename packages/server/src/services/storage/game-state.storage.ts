@@ -35,6 +35,8 @@ type GameStateUpdateFields = Partial<
     | "temperature"
     | "worldCustomFields"
     | "presentCharacters"
+    | "knownCharacters"
+    | "knownCustomTrackerScenes"
     | "playerStats"
     | "personaStats"
     | "fieldLocks"
@@ -54,6 +56,8 @@ type LockMigrationStateSource = {
   temperature?: unknown;
   worldCustomFields?: unknown;
   presentCharacters?: unknown;
+  knownCharacters?: unknown;
+  knownCustomTrackerScenes?: unknown;
   recentEvents?: unknown;
   playerStats?: unknown;
   personaStats?: unknown;
@@ -123,6 +127,8 @@ function buildLockMigrationState(row: LockMigrationStateSource): GameState {
     temperature: coerceGameStateTextValue(row.temperature),
     worldCustomFields: normalizeWorldCustomFields(parseSnapshotJson(row.worldCustomFields, [])),
     presentCharacters: parseSnapshotJson(row.presentCharacters, []),
+    knownCharacters: parseSnapshotJson(row.knownCharacters, []),
+    knownCustomTrackerScenes: parseSnapshotJson(row.knownCustomTrackerScenes, []),
     recentEvents: parseSnapshotJson(row.recentEvents, []),
     playerStats: parseSnapshotJson(row.playerStats, null),
     personaStats: parseSnapshotJson(row.personaStats, null),
@@ -349,6 +355,8 @@ export function createGameStateStorage(db: DB) {
         ...coerceSnapshotTextFields(state),
         worldCustomFields: JSON.stringify(normalizeWorldCustomFields(state.worldCustomFields)),
         presentCharacters: JSON.stringify(state.presentCharacters),
+        knownCharacters: JSON.stringify(state.knownCharacters ?? []),
+        knownCustomTrackerScenes: JSON.stringify(state.knownCustomTrackerScenes ?? []),
         recentEvents: JSON.stringify(state.recentEvents),
         playerStats: state.playerStats ? JSON.stringify(state.playerStats) : null,
         personaStats: state.personaStats ? JSON.stringify(state.personaStats) : null,
@@ -428,6 +436,16 @@ export function createGameStateStorage(db: DB) {
             ? JSON.parse(latest.presentCharacters)
             : latest.presentCharacters
           : [],
+        knownCharacters: latest?.knownCharacters
+          ? typeof latest.knownCharacters === "string"
+            ? JSON.parse(latest.knownCharacters)
+            : latest.knownCharacters
+          : [],
+        knownCustomTrackerScenes: latest?.knownCustomTrackerScenes
+          ? typeof latest.knownCustomTrackerScenes === "string"
+            ? JSON.parse(latest.knownCustomTrackerScenes)
+            : latest.knownCustomTrackerScenes
+          : [],
         recentEvents: latest?.recentEvents
           ? typeof latest.recentEvents === "string"
             ? JSON.parse(latest.recentEvents)
@@ -460,6 +478,9 @@ export function createGameStateStorage(db: DB) {
       if (fields.worldCustomFields !== undefined)
         baseState.worldCustomFields = normalizeWorldCustomFields(fields.worldCustomFields);
       if (fields.presentCharacters !== undefined) baseState.presentCharacters = fields.presentCharacters as any;
+      if (fields.knownCharacters !== undefined) baseState.knownCharacters = fields.knownCharacters as any;
+      if (fields.knownCustomTrackerScenes !== undefined)
+        baseState.knownCustomTrackerScenes = fields.knownCustomTrackerScenes as any;
       if (fields.playerStats !== undefined) baseState.playerStats = fields.playerStats as any;
       if (fields.personaStats !== undefined) baseState.personaStats = fields.personaStats as any;
       if (fields.fieldLocks !== undefined) {
@@ -497,6 +518,9 @@ export function createGameStateStorage(db: DB) {
       if (fields.worldCustomFields !== undefined)
         updates.worldCustomFields = JSON.stringify(normalizeWorldCustomFields(fields.worldCustomFields));
       if (fields.presentCharacters !== undefined) updates.presentCharacters = JSON.stringify(fields.presentCharacters);
+      if (fields.knownCharacters !== undefined) updates.knownCharacters = JSON.stringify(fields.knownCharacters);
+      if (fields.knownCustomTrackerScenes !== undefined)
+        updates.knownCustomTrackerScenes = JSON.stringify(fields.knownCustomTrackerScenes);
       if (fields.playerStats !== undefined)
         updates.playerStats = fields.playerStats ? JSON.stringify(fields.playerStats) : null;
       if (fields.personaStats !== undefined)

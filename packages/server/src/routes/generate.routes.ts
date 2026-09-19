@@ -256,6 +256,9 @@ import {
   applyTrackerCharacterCardIdentity,
   canonicalizeGamePartySpeakerLabels,
   collectLatestTrackerCharacterHistory,
+  mergeKnownTrackerCharacters,
+  mergeKnownCustomTrackerScenes,
+  customTrackerSceneFromFields,
   createLocalSidecarGenerationConnection,
   extractImageAttachmentDataUrls,
   appendNonLeadingSystemMessagesToLastUser,
@@ -370,6 +373,7 @@ import {
 import { registerDryRunRoute } from "./generate/dry-run-route.js";
 import { registerRawRoute } from "./generate/raw-route.js";
 import { registerRetryAgentsRoute, type ActiveAgentRun } from "./generate/retry-agents-route.js";
+import { beginTurnPostProcessing } from "../services/generation/turn-post-processing-barrier.js";
 import { fingerprintChatSummary } from "../services/prompt/chat-summary-fingerprint.js";
 import { isSseReplyWritable, sendSseEvent, startSseKeepalive, startSseReply } from "./generate/sse.js";
 import {
@@ -1307,6 +1311,11 @@ export async function generateRoutes(app: FastifyInstance) {
     const sendProgress = (phase: string) => {
       sendSseEvent(reply, { type: "progress", data: { phase } });
     };
+
+    // The assistant message becomes visible before post-processing agents finish.
+    // Keep a separate barrier so automatic visual follow-ups can wait for the
+    // tracker writes that describe this exact turn.
+    const releaseTurnPostProcessing = beginTurnPostProcessing(input.chatId);
 
     try {
       // ── Turn-game bot seats (UNO, etc.): drive the active game's bot players and
@@ -3968,10 +3977,16 @@ export async function generateRoutes(app: FastifyInstance) {
         const committedSnapshots = await gameStateStore.getCommittedForMessages(
           agentSlice.filter((m: any) => m.role === "assistant"),
         );
+        const knownTrackerCharacters = parseJsonField<Array<Record<string, unknown>>>(
+          latestGameState?.knownCharacters,
+          [],
+        );
         const characterTrackerHistory = resolvedAgents.some((agent) => agent.type === "character-tracker")
-          ? collectLatestTrackerCharacterHistory(
-              await gameStateStore.getRecent(input.chatId, 100, latestGameState?.createdAt),
-            )
+          ? knownTrackerCharacters.length > 0
+            ? knownTrackerCharacters
+            : collectLatestTrackerCharacterHistory(
+                await gameStateStore.getRecent(input.chatId, 100, latestGameState?.createdAt),
+              )
           : [];
         const visibleHistorySnapshot =
           latestGameState &&
@@ -6885,6 +6900,7 @@ export async function generateRoutes(app: FastifyInstance) {
           let parsedCommandCharacterIds: (string | null)[] | null = null;
           let parsedRawCommandCount = 0;
           let assistantSpatialDirective: ReturnType<typeof extractAssistantSpatialDirective>["directive"] = null;
+          let assistantSceneLocationId: string | null = null;
           let assistantSpatialDirectiveDetected = false;
           let conversationCommandContent: string | null = null;
           if (tailMessages.assistantPrefillInjected && assistantPrefill && fullResponse.startsWith(assistantPrefill)) {
@@ -7174,11 +7190,19 @@ export async function generateRoutes(app: FastifyInstance) {
 
           if (hierarchicalMapsEnabledForChat && (requestChatMode === "roleplay" || requestChatMode === "game")) {
             const parsedSpatial = extractAssistantSpatialDirective(fullResponse);
-            assistantSpatialDirectiveDetected = parsedSpatial.directive !== null;
+            assistantSpatialDirectiveDetected = parsedSpatial.directive !== null || parsedSpatial.sceneLocationId !== null;
             // A queued owner movement is the sole spatial mutation for this turn.
             // Still strip any package directive from the visible response, but do
             // not let model output compete with the already accepted route.
             assistantSpatialDirective = shouldSuppressAssistantSpatialMutation(input) ? null : parsedSpatial.directive;
+            // Empty-send continuation is deliberately model-led: use the location of the
+            // completed focal scene, not merely the last location named in its prose.
+            assistantSceneLocationId =
+              !shouldSuppressAssistantSpatialMutation(input) &&
+              requestChatMode === "roleplay" &&
+              Boolean(input.continueMessageId)
+                ? parsedSpatial.sceneLocationId
+                : null;
             if (parsedSpatial.matched) {
               fullResponse = parsedSpatial.cleanContent;
               contentReplaced = true;
@@ -7269,6 +7293,7 @@ export async function generateRoutes(app: FastifyInstance) {
                     regenerate: false,
                     continuation: false,
                     directive: assistantSpatialDirective,
+                    sceneLocationId: assistantSceneLocationId,
                   },
                   chatMeta,
                 );
@@ -7434,6 +7459,7 @@ export async function generateRoutes(app: FastifyInstance) {
                 regenerate: Boolean(input.regenerateMessageId),
                 continuation: Boolean(input.continueMessageId),
                 directive: assistantSpatialDirective,
+                sceneLocationId: assistantSceneLocationId,
               },
               chatMeta,
             );
@@ -8755,6 +8781,11 @@ export async function generateRoutes(app: FastifyInstance) {
                 // (character-tracker, persona-stats, quest, custom-tracker) will update
                 // them with authoritative data in their own handler blocks below.
                 const snapshotChars = parseJsonField<any[]>(prevSnap?.presentCharacters, []);
+                const snapshotKnownCharacters = parseJsonField<any[]>(prevSnap?.knownCharacters, []);
+                const snapshotKnownCustomTrackerScenes = parseJsonField<any[]>(
+                  prevSnap?.knownCustomTrackerScenes,
+                  [],
+                );
                 const snapshotWorldCustomFields = normalizeWorldCustomFields(
                   parseJsonField<unknown[]>(prevSnap?.worldCustomFields, []),
                 );
@@ -8799,6 +8830,8 @@ export async function generateRoutes(app: FastifyInstance) {
                     temperature: newTemperature,
                     worldCustomFields: newWorldCustomFields,
                     presentCharacters: snapshotChars,
+                    knownCharacters: snapshotKnownCharacters,
+                    knownCustomTrackerScenes: snapshotKnownCustomTrackerScenes,
                     recentEvents: (gs.recentEvents as string[]) ?? [],
                     playerStats: snapshotPlayerStats,
                     personaStats: snapshotPersonaStats,
@@ -8874,11 +8907,17 @@ export async function generateRoutes(app: FastifyInstance) {
             ) {
               try {
                 const ctData = result.data as Record<string, unknown>;
-                if (!Array.isArray(ctData.presentCharacters) || ctData.presentCharacters.length === 0) {
-                  logger.debug("[generate] character-tracker emitted no presentCharacters; keeping existing snapshot");
+                const hasPresentCharacters = Array.isArray(ctData.presentCharacters);
+                const knownCharacterUpdates = Array.isArray(ctData.knownCharacterUpdates)
+                  ? (ctData.knownCharacterUpdates.filter((character): character is Record<string, unknown> =>
+                      Boolean(character && typeof character === "object" && !Array.isArray(character)),
+                    ) as Array<Record<string, unknown>>)
+                  : [];
+                if (!hasPresentCharacters && knownCharacterUpdates.length === 0) {
+                  logger.debug("[generate] character-tracker emitted no character state; keeping existing snapshot");
                   continue;
                 }
-                let chars = ctData.presentCharacters as any[];
+                let chars = hasPresentCharacters ? (ctData.presentCharacters as any[]) : [];
                 const snapBeforeUpdate = await gameStateStore.getByMessage(messageId, targetSwipeIndex);
                 const previousCharacterSnapshot =
                   snapBeforeUpdate ??
@@ -8886,6 +8925,10 @@ export async function generateRoutes(app: FastifyInstance) {
                   (allowLatestGameStateFallback ? await gameStateStore.getLatest(input.chatId) : null);
                 const cardCharacterIds = applyTrackerCharacterCardIdentity(chars, charInfo);
                 const oldChars = parseJsonField<any[]>(previousCharacterSnapshot?.presentCharacters, []);
+                const oldKnownCharacters = parseJsonField<Array<Record<string, unknown>>>(
+                  previousCharacterSnapshot?.knownCharacters,
+                  [],
+                );
                 preserveTrackerCharacterUiFields(chars, oldChars);
                 preserveTrackerCharacterUiFields(chars, characterTrackerHistory);
                 const characterLockState = previousCharacterSnapshot
@@ -9066,6 +9109,10 @@ export async function generateRoutes(app: FastifyInstance) {
                         const presentCharacters = Array.isArray(lockedAvatarPatch.presentCharacters)
                           ? lockedAvatarPatch.presentCharacters
                           : mergedAvatarCharacters;
+                        const knownCharacters = mergeKnownTrackerCharacters(
+                          parseJsonField<Array<Record<string, unknown>>>(latestAvatarSnapshot?.knownCharacters, []),
+                          presentCharacters,
+                        );
 
                         await gameStateStore.updateByMessage(
                           messageId,
@@ -9073,6 +9120,7 @@ export async function generateRoutes(app: FastifyInstance) {
                           input.chatId,
                           {
                             presentCharacters,
+                            knownCharacters: knownCharacters as any,
                           },
                           undefined,
                           { baseSnapshot: trackerBaseGameStateSnapshot },
@@ -9089,22 +9137,35 @@ export async function generateRoutes(app: FastifyInstance) {
                   }
                 }
 
+                const retainedCharacterUpdates = mergeKnownTrackerCharacters(knownCharacterUpdates, chars);
+                applyTrackerCharacterCardIdentity(retainedCharacterUpdates, charInfo);
+                preserveTrackerCharacterUiFields(retainedCharacterUpdates, oldKnownCharacters);
+                preserveTrackerCharacterUiFields(retainedCharacterUpdates, characterTrackerHistory);
+                const knownCharacters = mergeKnownTrackerCharacters(oldKnownCharacters, retainedCharacterUpdates);
+                const trackerSnapshotPatch = {
+                  ...(hasPresentCharacters ? { presentCharacters: chars } : {}),
+                  knownCharacters: knownCharacters as any,
+                };
+
                 const updated = await gameStateStore.updateByMessage(
                   messageId,
                   targetSwipeIndex,
                   input.chatId,
-                  {
-                    presentCharacters: chars,
-                  },
+                  trackerSnapshotPatch,
                   undefined,
                   { baseSnapshot: trackerBaseGameStateSnapshot },
                 );
                 logger.info(
-                  `[generate] character-tracker: updateByMessage returned ${updated ? "ok" : "null (no snapshot)"}`,
+                  `[generate] character-tracker: updateByMessage returned ${updated ? "ok" : "null (no snapshot)"}; knownCharacters=${knownCharacters.length}`,
                 );
-                // Merge into the game_state SSE event for the HUD
-                logger.debug("[game_state_patch] character-tracker: %s", chars.map((c: any) => c.name ?? c).join(", "));
-                sendSseEvent(reply, { type: "game_state_patch", data: { presentCharacters: chars } });
+                // Only presentCharacters belongs in the HUD. knownCharacters is retained for Storyboard continuity.
+                if (hasPresentCharacters) {
+                  logger.debug(
+                    "[game_state_patch] character-tracker: %s",
+                    chars.map((c: any) => c.name ?? c).join(", "),
+                  );
+                  sendSseEvent(reply, { type: "game_state_patch", data: { presentCharacters: chars } });
+                }
 
                 // Auto-populate journal: NPC encounters
                 try {
@@ -9250,7 +9311,10 @@ export async function generateRoutes(app: FastifyInstance) {
                 const ctData = result.data as Record<string, unknown>;
                 const hasFields = Array.isArray(ctData.fields);
                 const rawFields = hasFields ? (ctData.fields as any[]) : [];
-                if (hasFields) {
+                const knownSceneStateUpdates = Array.isArray(ctData.knownSceneStateUpdates)
+                  ? ctData.knownSceneStateUpdates
+                  : [];
+                if (hasFields || knownSceneStateUpdates.length > 0) {
                   // Ensure a snapshot exists for this (messageId, swipeIndex)
                   let snap = await gameStateStore.getByMessage(messageId, targetSwipeIndex);
                   if (!snap) {
@@ -9260,25 +9324,47 @@ export async function generateRoutes(app: FastifyInstance) {
                     snap = await gameStateStore.getByMessage(messageId, targetSwipeIndex);
                   }
                   const customLockState = snap ? parseGameStateRow(snap as Record<string, unknown>) : null;
-                  const customTrackerPatch = buildLockedPlayerStatsArrayPatch<any>({
-                    field: "customTrackerFields",
-                    values: rawFields,
-                    snapshot: snap,
-                    lockState: customLockState,
-                  });
-                  if (snap && customTrackerPatch.changed) {
+                  const customTrackerPatch = hasFields
+                    ? buildLockedPlayerStatsArrayPatch<any>({
+                        field: "customTrackerFields",
+                        values: rawFields,
+                        snapshot: snap,
+                        lockState: customLockState,
+                      })
+                    : null;
+                  const currentScene = customTrackerPatch
+                    ? customTrackerSceneFromFields(customTrackerPatch.values)
+                    : null;
+                  const previousKnownScenes = parseJsonField<any[]>(snap?.knownCustomTrackerScenes, []);
+                  const knownCustomTrackerScenes = mergeKnownCustomTrackerScenes(previousKnownScenes, [
+                    ...knownSceneStateUpdates,
+                    ...(currentScene ? [currentScene] : []),
+                  ]);
+                  if (
+                    snap &&
+                    ((customTrackerPatch?.changed ?? false) ||
+                      knownSceneStateUpdates.length > 0 ||
+                      knownCustomTrackerScenes.length !== previousKnownScenes.length)
+                  ) {
                     await app.db
                       .update(gameStateSnapshotsTable)
                       .set({
-                        playerStats: JSON.stringify(customTrackerPatch.playerStats),
-                        fieldLocks: serializeMigratedTrackerLocks(customLockState),
+                        ...(customTrackerPatch ? { playerStats: JSON.stringify(customTrackerPatch.playerStats) } : {}),
+                        knownCustomTrackerScenes: JSON.stringify(knownCustomTrackerScenes),
+                        ...(customTrackerPatch
+                          ? { fieldLocks: serializeMigratedTrackerLocks(customLockState) }
+                          : {}),
                       })
                       .where(eq(gameStateSnapshotsTable.id, snap.id));
                   }
-                  if (customTrackerPatch.changed) {
+                  if (customTrackerPatch?.changed) {
                     logger.debug("[game_state_patch] custom-tracker: %j", customTrackerPatch.values);
                     sendSseEvent(reply, { type: "game_state_patch", data: customTrackerPatch.patch });
                   }
+                  logger.info(
+                    "[generate] custom-tracker: knownCustomTrackerScenes=%s",
+                    knownCustomTrackerScenes.length,
+                  );
                 }
               } catch (err) {
                 logger.error(err, "[generate] Failed to apply custom tracker update");
@@ -10599,6 +10685,7 @@ export async function generateRoutes(app: FastifyInstance) {
       // still arrive without holding the chat's generation lock hostage.
       sendSseEvent(reply, { type: "done", data: "" });
       releaseActiveGeneration();
+      releaseTurnPostProcessing();
 
       // Start the independent scene-background tail after tracker persistence,
       // then keep the SSE stream open for both visual jobs.
@@ -10631,6 +10718,7 @@ export async function generateRoutes(app: FastifyInstance) {
       reply.raw.off("close", onClose);
       releaseActiveGeneration();
       releaseActiveAgentRun();
+      releaseTurnPostProcessing();
       if (!clientDisconnected && isSseReplyWritable(reply)) {
         reply.raw.end();
       }
